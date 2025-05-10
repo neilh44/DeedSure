@@ -17,7 +17,12 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "llama3-8b-8192"
     
     # CORS settings
-    BACKEND_CORS_ORIGINS: List[str] = ["http://localhost:3000", "https://localhost:3000"]
+    BACKEND_CORS_ORIGINS: List[str] = [
+        "http://localhost:3000", 
+        "https://localhost:3000",
+        "http://localhost:5176",  # Add your frontend's origin
+        "https://localhost:5177"
+    ]
 
     class Config:
         env_file = ".env"

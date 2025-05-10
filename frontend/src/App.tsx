@@ -1,6 +1,7 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from '@/components/ui/toaster'
+import { AuthProvider } from '@/context/AuthContext' // Add this import
 
 // Layouts
 import AuthLayout from '@/components/layouts/AuthLayout'
@@ -25,26 +26,28 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <Router>
-        <Routes>
-          {/* Auth Routes */}
-          <Route element={<AuthLayout />}>
-            <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
-          </Route>
-          
-          {/* Dashboard Routes */}
-          <Route element={<DashboardLayout />}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/documents" element={<DocumentsList />} />
-            <Route path="/documents/upload" element={<DocumentUpload />} />
-            <Route path="/documents/:id" element={<DocumentView />} />
-            <Route path="/reports" element={<ReportsList />} />
-            <Route path="/reports/create" element={<ReportCreate />} />
-            <Route path="/reports/:id" element={<ReportView />} />
-            <Route path="/profile" element={<UserProfile />} />
-          </Route>
-        </Routes>
-        <Toaster />
+        <AuthProvider> {/* Add this wrapper */}
+          <Routes>
+            {/* Auth Routes */}
+            <Route element={<AuthLayout />}>
+              <Route path="/login" element={<Login />} />
+              <Route path="/register" element={<Register />} />
+            </Route>
+            
+            {/* Dashboard Routes */}
+            <Route element={<DashboardLayout />}>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/documents" element={<DocumentsList />} />
+              <Route path="/documents/upload" element={<DocumentUpload />} />
+              <Route path="/documents/:id" element={<DocumentView />} />
+              <Route path="/reports" element={<ReportsList />} />
+              <Route path="/reports/create" element={<ReportCreate />} />
+              <Route path="/reports/:id" element={<ReportView />} />
+              <Route path="/profile" element={<UserProfile />} />
+            </Route>
+          </Routes>
+          <Toaster />
+        </AuthProvider> {/* Close the wrapper */}
       </Router>
     </QueryClientProvider>
   )
