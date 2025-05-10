@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from typing import List, Dict, Any
 import uuid
 from datetime import datetime
-import io
 import logging
 from app.core.database import get_db
 from app.services.document_processor import DocumentProcessor
@@ -35,7 +34,7 @@ async def upload_document(
         # Get Supabase client
         supabase = get_db()
         
-        # Skip the test for now and directly try to upload
+        # Try to upload the file
         try:
             # Upload directly using the raw bytes
             storage_response = supabase.storage.from_("deedsure").upload(
@@ -86,19 +85,23 @@ async def upload_document(
         
         # Now create the document record in the database
         try:
-            # Prepare document record
+            # Prepare document record with fields that match the database schema
             doc_record = {
                 "id": document_id,
                 "user_id": current_user_id,
                 "filename": file.filename,
-                "storage_path": storage_path,
+                "file_path": storage_path,  # Changed from storage_path to file_path to match DB
                 "content_type": file.content_type,
-                "size": file_size,
+                "file_size": file_size,  # Using file_size instead of size
+                "file_size_bytes": file_size,  # Also set file_size_bytes for larger files
                 "category": category,
                 "status": "processed" if extracted_text else "uploaded",
                 "extracted_text": extracted_text,
                 "metadata": metadata
             }
+            
+            # Log the document record being inserted
+            logger.info(f"Inserting document record with fields: {', '.join(doc_record.keys())}")
             
             # Insert document record
             db_response = supabase.table("documents").insert(doc_record).execute()
@@ -120,7 +123,8 @@ async def upload_document(
             "id": document_id,
             "filename": file.filename,
             "content_type": file.content_type,
-            "size": file_size,
+            "file_size": file_size,
+            "file_size_bytes": file_size,
             "category": category,
             "status": "processed" if extracted_text else "uploaded",
             "storage_url": storage_url,
