@@ -17,66 +17,46 @@ router = APIRouter()
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    current_user_id: str = "00000000-0000-0000-0000-000000000000"  # Replace with actual user ID later
 ) -> Dict[str, Any]:
     try:
         logger.info(f"Starting upload for file: {file.filename}")
         
-        # Get file content as bytes
+        # Get file content
         contents = await file.read()
         file_size = len(contents)
         
         # Generate a unique ID
         document_id = str(uuid.uuid4())
         
-        # Create a path structure: user_id/document_id/filename
+        # Create a simpler path structure for now: document_id/filename
         safe_filename = "".join([c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in file.filename])
-        storage_path = f"{current_user_id}/{document_id}/{safe_filename}"
+        storage_path = f"{document_id}/{safe_filename}"
         
         # Get Supabase client
         supabase = get_db()
         
-        # Make a simple test first to check if storage is working
+        # Skip the test for now and directly try to upload
         try:
-            logger.info("Testing storage access")
-            test_path = f"{current_user_id}/test-{uuid.uuid4()}.txt"
+            # Convert the bytes to a file-like object
+            file_obj = io.BytesIO(contents)
+            file_obj.seek(0)  # Ensure we're at the start of the file
             
-            # Use bytes directly instead of BytesIO
-            test_content = b"test"
-            
-            # Method 1: Upload using bytes directly
-            test_response = supabase.storage.from_("deedsure").upload(
-                path=test_path,
-                file=test_content,  # Pass bytes directly
-                file_options={"content_type": "text/plain"}
-            )
-            logger.info(f"Storage test successful: {test_response}")
-            
-            # Clean up test file
-            supabase.storage.from_("deedsure").remove([test_path])
-        except Exception as test_error:
-            logger.error(f"Storage test failed: {str(test_error)}")
-            # Continue with the actual upload, but log the test error
-        
-        # Now do the actual file upload
-        try:
-            # Use the file contents directly as bytes
+            # Upload directly - fix the file_options parameter
             storage_response = supabase.storage.from_("deedsure").upload(
                 path=storage_path,
-                file=contents,  # Pass bytes directly
-                file_options={
-                    "content_type": file.content_type,
-                    "upsert": True
-                }
+                file=file_obj,
+                file_options={"content_type": file.content_type}
             )
+            
             logger.info(f"File uploaded successfully: {storage_response}")
             
-            # Try to get public URL
+            # Get the file URL
             try:
                 storage_url = supabase.storage.from_("deedsure").get_public_url(storage_path)
+                logger.info(f"File URL: {storage_url}")
             except Exception as url_error:
                 logger.error(f"Error getting URL: {str(url_error)}")
-                storage_url = f"/api/storage/deedsure/{storage_path}"  # Fallback URL
+                storage_url = None
         except Exception as storage_error:
             logger.error(f"Storage error: {str(storage_error)}")
             raise HTTPException(
@@ -105,7 +85,10 @@ async def upload_document(
                 logger.error(f"Processing error: {str(processing_error)}")
                 # Don't fail the upload, just note the processing error
         
-        # Now create/update the document record in the database
+        # Temporary hard-coded user ID for development
+        current_user_id = "00000000-0000-0000-0000-000000000000"  # Replace with real auth later
+        
+        # Now create the document record in the database
         try:
             # Prepare document record
             doc_record = {
@@ -123,14 +106,14 @@ async def upload_document(
             
             # Insert document record
             db_response = supabase.table("documents").insert(doc_record).execute()
-            logger.info(f"Document record created: {db_response}")
+            logger.info(f"Document record created in database")
         except Exception as db_error:
             logger.error(f"Database error: {str(db_error)}")
             # Try to clean up the uploaded file
             try:
                 supabase.storage.from_("deedsure").remove([storage_path])
-            except:
-                pass
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up file: {str(cleanup_error)}")
             
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
