@@ -3,7 +3,9 @@ from typing import List, Dict, Any
 import uuid
 from datetime import datetime
 import logging
-from app.core.database import get_db
+# Fix imports based on your project structure
+from app.core.database import get_admin_db, get_current_active_user  # Import both from database.py
+
 from app.services.document_processor import DocumentProcessor
 
 
@@ -16,6 +18,7 @@ router = APIRouter()
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_active_user)  # Get authenticated user
 ) -> Dict[str, Any]:
     try:
         logger.info(f"Starting upload for file: {file.filename}")
@@ -31,8 +34,8 @@ async def upload_document(
         safe_filename = "".join([c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in file.filename])
         storage_path = f"{document_id}/{safe_filename}"
         
-        # Get Supabase client
-        supabase = get_db()
+        # Get Supabase admin client to bypass RLS
+        supabase = get_admin_db()
         
         # Try to upload the file
         try:
@@ -80,20 +83,20 @@ async def upload_document(
                 logger.error(f"Processing error: {str(processing_error)}")
                 # Don't fail the upload, just note the processing error
         
-        # Temporary hard-coded user ID for development
-        current_user_id = "00000000-0000-0000-0000-000000000000"  # Replace with real auth later
+        # Use the authenticated user's ID
+        current_user_id = current_user["id"]
         
         # Now create the document record in the database
         try:
             # Prepare document record with fields that match the database schema
             doc_record = {
                 "id": document_id,
-                "user_id": current_user_id,
+                "user_id": current_user_id,  # Use the real authenticated user ID
                 "filename": file.filename,
-                "file_path": storage_path,  # Changed from storage_path to file_path to match DB
+                "file_path": storage_path,  # Using file_path as per DB schema
                 "content_type": file.content_type,
-                "file_size": file_size,  # Using file_size instead of size
-                "file_size_bytes": file_size,  # Also set file_size_bytes for larger files
+                "file_size": file_size,
+                "file_size_bytes": file_size,
                 "category": category,
                 "status": "processed" if extracted_text else "uploaded",
                 "extracted_text": extracted_text,
@@ -103,7 +106,7 @@ async def upload_document(
             # Log the document record being inserted
             logger.info(f"Inserting document record with fields: {', '.join(doc_record.keys())}")
             
-            # Insert document record
+            # Insert document record using admin client to bypass RLS
             db_response = supabase.table("documents").insert(doc_record).execute()
             logger.info(f"Document record created in database")
         except Exception as db_error:
