@@ -21,7 +21,8 @@ class Settings(BaseSettings):
         "http://localhost:3000", 
         "https://localhost:3000",
         "http://localhost:5176",  # Add your frontend's origin
-        "https://localhost:5177"
+        "https://localhost:5177",
+        "https://deedsure-client.onrender.com",
     ]
 
     class Config:

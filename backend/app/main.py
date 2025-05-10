@@ -26,6 +26,8 @@ origins = [
    "http://127.0.0.1:3000",
    "http://127.0.0.1:5173",
    "http://127.0.0.1:8080",
+   # Add Render-hosted frontend
+   "https://deedsure-client.onrender.com",
 ]
 
 # If settings has CORS origins, add them to our list
@@ -36,7 +38,7 @@ if settings.BACKEND_CORS_ORIGINS:
 app.add_middleware(
    CORSMiddleware,
    allow_origins=origins,
-   allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:[0-9]+)?",  # Allow any localhost port
+   allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:[0-9]+)?|https://.*\.onrender\.com",  # Allow localhost and Render domains
    allow_credentials=True,
    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-CSRF-Token"],
