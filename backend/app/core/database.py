@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Initialize regular Supabase client for authentication
+# Initialize Supabase client with modern API
 try:
     supabase: Client = create_client(
         settings.SUPABASE_URL, 
@@ -26,40 +26,8 @@ except Exception as e:
     logger.error(f"Failed to initialize Supabase client: {e}")
     raise
 
-# Initialize admin Supabase client with service role key for bypassing RLS
-try:
-    # Make sure to add SUPABASE_SERVICE_ROLE_KEY to your settings/environment variables
-    supabase_admin: Client = create_client(
-        settings.SUPABASE_URL, 
-        settings.SUPABASE_SERVICE_ROLE_KEY,
-        options=ClientOptions(
-            auto_refresh_token=False,
-            persist_session=False
-        )
-    )
-    logger.info("Supabase admin client initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Supabase admin client: {e}")
-    # Log error but don't raise, as we might not need admin capabilities in all cases
-    supabase_admin = None
-
 def get_db() -> Client:
-    """
-    Returns the regular Supabase client for auth operations
-    """
     return supabase
-
-def get_admin_db() -> Client:
-    """
-    Returns the admin Supabase client with service role key for bypassing RLS
-    """
-    if supabase_admin is None:
-        logger.error("Admin database client was not initialized properly")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database configuration error"
-        )
-    return supabase_admin
 
 # OAuth2 scheme for token authentication
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
@@ -103,11 +71,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any
         logger.warning(f"JWT verification failed: {e}")
         raise credentials_exception
     
-    # Get user from database - use admin client to bypass RLS if needed
+    # Get user from database
     try:
-        # Use admin client to ensure we can always access user data regardless of RLS
-        client = get_admin_db() if supabase_admin else get_db()
-        response = client.table("users").select("*").eq("id", user_id).single().execute()
+        response = supabase.table("users").select("*").eq("id", user_id).single().execute()
         
         if not response.data:
             logger.warning(f"User with ID {user_id} not found in database")
