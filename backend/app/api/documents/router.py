@@ -17,13 +17,12 @@ router = APIRouter()
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    # For development, you might need to use a fixed user ID until auth is fully set up
-    current_user_id: str = "00000000-0000-0000-0000-000000000000"  # Replace with actual user ID from auth
+    current_user_id: str = "00000000-0000-0000-0000-000000000000"  # Replace with actual user ID later
 ) -> Dict[str, Any]:
     try:
         logger.info(f"Starting upload for file: {file.filename}")
         
-        # Get file content
+        # Get file content as bytes
         contents = await file.read()
         file_size = len(contents)
         
@@ -31,7 +30,6 @@ async def upload_document(
         document_id = str(uuid.uuid4())
         
         # Create a path structure: user_id/document_id/filename
-        # Make sure filename is URL-safe
         safe_filename = "".join([c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in file.filename])
         storage_path = f"{current_user_id}/{document_id}/{safe_filename}"
         
@@ -41,13 +39,15 @@ async def upload_document(
         # Make a simple test first to check if storage is working
         try:
             logger.info("Testing storage access")
-            test_content = b"test"
-            test_file = io.BytesIO(test_content)
             test_path = f"{current_user_id}/test-{uuid.uuid4()}.txt"
             
+            # Use bytes directly instead of BytesIO
+            test_content = b"test"
+            
+            # Method 1: Upload using bytes directly
             test_response = supabase.storage.from_("deedsure").upload(
                 path=test_path,
-                file=test_file,
+                file=test_content,  # Pass bytes directly
                 file_options={"content_type": "text/plain"}
             )
             logger.info(f"Storage test successful: {test_response}")
@@ -60,15 +60,13 @@ async def upload_document(
         
         # Now do the actual file upload
         try:
-            file_obj = io.BytesIO(contents)
-            
-            # Use upsert option to replace if exists
+            # Use the file contents directly as bytes
             storage_response = supabase.storage.from_("deedsure").upload(
                 path=storage_path,
-                file=file_obj,
+                file=contents,  # Pass bytes directly
                 file_options={
                     "content_type": file.content_type,
-                    "upsert": True  # Replace if exists
+                    "upsert": True
                 }
             )
             logger.info(f"File uploaded successfully: {storage_response}")
@@ -81,12 +79,6 @@ async def upload_document(
                 storage_url = f"/api/storage/deedsure/{storage_path}"  # Fallback URL
         except Exception as storage_error:
             logger.error(f"Storage error: {str(storage_error)}")
-            # Try a more detailed error analysis
-            if "permission denied" in str(storage_error).lower():
-                logger.error("Permission denied. Check RLS policies and user authentication.")
-            elif "not found" in str(storage_error).lower():
-                logger.error("Bucket not found. Check bucket name is correct.")
-            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Storage error: {str(storage_error)}"
@@ -115,7 +107,7 @@ async def upload_document(
         
         # Now create/update the document record in the database
         try:
-            # Check the actual schema of your documents table to ensure these fields match
+            # Prepare document record
             doc_record = {
                 "id": document_id,
                 "user_id": current_user_id,
@@ -162,4 +154,3 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error uploading document: {str(e)}"
         )
-    
