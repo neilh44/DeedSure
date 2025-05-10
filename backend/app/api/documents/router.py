@@ -75,21 +75,23 @@ async def upload_document(
                 logger.error(f"Processing error: {str(processing_error)}")
                 # Don't fail the upload, just note the processing error
         
-        # Handle the user_id properly - ensure it's a UUID if the database expects a UUID
+        # Handle the user_id properly - ensure it's a string UUID for JSON serialization
         try:
-            # If current_user["id"] is already a UUID object, use it directly
+            # If it's already a UUID object, convert to string
             if isinstance(current_user["id"], uuid.UUID):
-                current_user_id = current_user["id"]
-            # If it's a string representation of a UUID, convert it
+                current_user_id = str(current_user["id"])
+            # If it's a string representation of a UUID, use it directly
             else:
-                current_user_id = uuid.UUID(str(current_user["id"]))
+                # Validate that it's a proper UUID string
+                uuid.UUID(str(current_user["id"]))  # This will raise an error if invalid
+                current_user_id = str(current_user["id"])
             
             logger.info(f"Using user ID: {current_user_id} (type: {type(current_user_id).__name__})")
         except Exception as uid_error:
-            logger.error(f"Error converting user ID: {str(uid_error)}")
-            # Fall back to using it as-is
-            current_user_id = current_user["id"]
-            logger.info(f"Falling back to user ID as-is: {current_user_id} (type: {type(current_user_id).__name__})")
+            logger.error(f"Error handling user ID: {str(uid_error)}")
+            # Fall back to using it as-is but still as a string
+            current_user_id = str(current_user["id"])
+            logger.info(f"Falling back to string user ID: {current_user_id}")
         
         # Now create the document record in the database - try admin client first
         try:
@@ -104,7 +106,7 @@ async def upload_document(
             # Prepare document record with fields that match the database schema
             doc_record = {
                 "id": document_id,
-                "user_id": current_user_id,  # This should now be the correct type (UUID)
+                "user_id": current_user_id,  # Now a string UUID, which is JSON serializable
                 "filename": file.filename,
                 "file_path": storage_path,
                 "content_type": file.content_type,
