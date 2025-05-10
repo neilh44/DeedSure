@@ -1,0 +1,27 @@
+from pydantic_settings import BaseSettings
+from typing import Optional, Dict, Any, List
+
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Legal Title Search API"
+    API_V1_STR: str = "/api/v1"
+    SECRET_KEY: str = "your-secret-key-change-in-production"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
+    
+    # Supabase settings
+    SUPABASE_URL: str
+    SUPABASE_KEY: str
+    
+    # Groq API settings
+    GROQ_API_KEY: str
+    LLM_MODEL: str = "llama3-8b-8192"
+    
+    # CORS settings
+    BACKEND_CORS_ORIGINS: List[str] = ["http://localhost:3000", "https://localhost:3000"]
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+
+settings = Settings()

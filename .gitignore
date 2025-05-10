@@ -1,0 +1,276 @@
+# Root .gitignore file for Legal Title Search Report Generator Platform
+
+# Python virtual environment
+venv/
+env/
+ENV/
+.env
+.venv
+venv
+env.bak/
+venv.bak/
+pythonenv*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.eggs/
+
+# Node.js dependencies
+node_modules/
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log* 
+.pnp/
+.pnp.js
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist/
+build/
+out/
+*.mjs
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Editor settings
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+.directory
+.project
+.settings/
+.classpath
+.factorypath
+*.swp
+*.swo
+*~
+
+# Frontend specific
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+.vuepress/dist
+.serverless/
+.fusebox/
+.dynamodb/
+
+# Backend specific
+*.sqlite
+*.sqlite3
+*.db
+*.log
+logs/
+media/
+static/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Operating system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.fseventsd
+.Spotlight-V100
+.Trashes
+Icon?
+
+# TypeScript
+*.tsbuildinfo
+.eslintcache
+
+# Debugging files
+debug.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Render specific
+.render-buildpacks
+
+# Testing
+coverage/
+.nyc_output/
+
+# Dependency directories
+jspm_packages/
+
+# Generated files
+.docusaurus
+.cache-loader
+
+# Misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+
+# Most important exclusions
+venv/
+node_modules/
+
+# Python virtual environment (additional patterns)
+env/
+ENV/
+.env
+.venv
+env.bak/
+venv.bak/
+pythonenv*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.eggs/
+
+# Node.js dependencies (additional patterns)
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist/
+build/
+out/
+*.mjs
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Editor settings
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+.directory
+.project
+.settings/
+.classpath
+.factorypath
+*.swp
+*.swo
+*~
+
+# Frontend specific
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+.vuepress/dist
+.serverless/
+.fusebox/
+.dynamodb/
+
+# Backend specific
+*.sqlite
+*.sqlite3
+*.db
+*.log
+logs/
+media/
+static/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Operating system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.fseventsd
+.Spotlight-V100
+.Trashes
+Icon?
+
+# TypeScript
+*.tsbuildinfo
+.eslintcache
+
+# Debugging files
+debug.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Render specific
+.render-buildpacks
+
+# Testing
+coverage/
+.nyc_output/
+
+# Dependency directories
+jspm_packages/
+
+# Generated files
+.docusaurus
+.cache-loader
+
+# Misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

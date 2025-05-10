@@ -1,0 +1,31 @@
+# FastAPI framework
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.4.2
+
+# Database and Supabase
+supabase==1.0.3
+psycopg2-binary==2.9.9
+python-jose==3.3.0
+passlib==1.7.4
+python-multipart==0.0.6
+
+# Document processing
+pypdf2==3.0.1
+pdf2text==1.0.0
+langchain==0.0.335
+langchain-community==0.0.16
+fastapi-pagination==0.12.12
+
+# LLM integration
+groq==0.4.1
+tiktoken==0.5.2
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0
+pydantic-settings==2.1.0
+
+# Testing
+pytest==7.4.3
+httpx
