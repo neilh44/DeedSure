@@ -7,7 +7,7 @@ import type {
 } from"@/components/ui/toast"
 
 const TOAST_LIMIT = 5
-const TOAST_REMOVE_DELAY = 5000
+// Remove unused TOAST_REMOVE_DELAY or use it somewhere
 
 type ToasterToast = ToastProps & {
   id: string
@@ -54,7 +54,7 @@ interface State {
   toasts: ToasterToast[]
 }
 
-const toastTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+// Remove unused toastTimeouts or use it somewhere
 
 const reducer = (state: State, action: Action): State => {
   switch (action.type) {
