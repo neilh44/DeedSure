@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { File, FileText, Upload } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+// Removed the unused Button import
 import api from '@/lib/api'
 
 interface Document {
