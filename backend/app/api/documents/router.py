@@ -1,9 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Body
 from typing import List, Dict, Any
-import uuid  # Make sure this is imported
+import uuid
+from datetime import datetime
 import logging
+
 from app.core.database import get_db, get_admin_db, get_current_active_user
 from app.services.document_processor import DocumentProcessor
+from app.services.llm_service import LLMService
+from app.utils.storage import get_document_from_storage
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -163,3 +167,178 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error uploading document: {str(e)}"
         )
+    
+@router.post("/{document_id}/process")
+async def process_document(
+    document_id: str
+) -> Dict[str, Any]:
+    """Process an already uploaded document to extract text and metadata"""
+    # Get database connection
+    supabase = get_db()
+    
+    try:
+        # Retrieve document from Supabase
+        file_content, document = await get_document_from_storage(supabase, document_id)
+        
+        # Update document status to processing
+        supabase.table("documents").update({
+            "status": "processing"
+        }).eq("id", document_id).execute()
+        
+        # Extract text based on content type
+        content_type = document.get("content_type", "")
+        if "pdf" in content_type.lower():
+            extracted_text = await DocumentProcessor.extract_text_from_pdf(file_content)
+        else:
+            # Handle other file types or raise an error
+            raise ValueError(f"Unsupported content type: {content_type}")
+        
+        # Categorize the document
+        category = await DocumentProcessor.categorize_document(extracted_text)
+        
+        # Extract metadata
+        metadata = await DocumentProcessor.extract_metadata(extracted_text, category)
+        
+        # Update the document record with processed information
+        supabase.table("documents").update({
+            "status": "processed",
+            "category": category,
+            "extracted_text": extracted_text,
+            "metadata": metadata,
+            "processed_at": datetime.now().isoformat()
+        }).eq("id", document_id).execute()
+        
+        return {
+            "id": document_id,
+            "status": "processed",
+            "category": category,
+            "metadata": metadata,
+            "message": "Document processed successfully"
+        }
+        
+    except Exception as e:
+        # Update status to failed if an error occurs
+        try:
+            supabase.table("documents").update({
+                "status": "failed", 
+                "error": str(e)
+            }).eq("id", document_id).execute()
+        except:
+            pass
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document processing failed: {str(e)}"
+        )
+
+
+@router.post("/{document_id}/analyze")
+async def analyze_document(
+    document_id: str
+) -> Dict[str, Any]:
+    """Analyze a document using the LLM service"""
+    # Get database connection
+    supabase = get_db()
+    
+    try:
+        # Check if document exists and has been processed
+        response = supabase.table("documents").select("*").eq("id", document_id).execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        document = response.data[0]
+        
+        # Check if document has extracted text
+        if not document.get("extracted_text"):
+            # If not processed, process it first
+            if document.get("status") != "processed":
+                await process_document(document_id)
+                # Get updated document
+                response = supabase.table("documents").select("*").eq("id", document_id).execute()
+                document = response.data[0]
+        
+        # Get extracted text
+        extracted_text = document.get("extracted_text", "")
+        
+        if not extracted_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document has no extracted text to analyze"
+            )
+        
+        # Create LLM service
+        llm_service = LLMService()
+        
+        # Send to LLM for analysis
+        analysis_result = await llm_service.analyze_single_document(extracted_text)
+        
+        # Store analysis in the database
+        analysis_id = str(uuid.uuid4())
+        analysis_record = {
+            "id": analysis_id,
+            "document_id": document_id,
+            "analysis_type": "single_document",
+            "analysis_date": datetime.now().isoformat(),
+            "content": analysis_result
+        }
+        
+        # Insert analysis record
+        supabase.table("document_analyses").insert(analysis_record).execute()
+        
+        return {
+            **analysis_record,
+            "message": "Document analyzed successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document analysis failed: {str(e)}"
+        )
+
+
+@router.get("/{document_id}/analyses")
+async def list_document_analyses(document_id: str) -> List[Dict[str, Any]]:
+    """List all analyses for a document"""
+    # Get database connection
+    supabase = get_db()
+    
+    # Check if document exists
+    doc_response = supabase.table("documents").select("id").eq("id", document_id).execute()
+    
+    if not doc_response.data or len(doc_response.data) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found"
+        )
+    
+    # Get analyses for the document
+    response = supabase.table("document_analyses").select("*").eq("document_id", document_id).order("analysis_date", desc=True).execute()
+    
+    if response.data:
+        return response.data
+    return []
+
+
+@router.get("/analyses/{analysis_id}")
+async def get_document_analysis(analysis_id: str) -> Dict[str, Any]:
+    """Get a specific document analysis"""
+    # Get database connection
+    supabase = get_db()
+    
+    # Get analysis by ID
+    response = supabase.table("document_analyses").select("*").eq("id", analysis_id).execute()
+    
+    if not response.data or len(response.data) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis with ID {analysis_id} not found"
+        )
+    
+    return response.data[0]
