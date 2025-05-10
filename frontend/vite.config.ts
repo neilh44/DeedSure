@@ -13,7 +13,7 @@ export default defineConfig({
   preview: {
     allowedHosts: [
       'localhost',
-      'https://deedsure.onrender.com'
+      'deedsure.onrender.com'
     ],
   },
   server: {
