@@ -30,13 +30,8 @@ async def upload_document(
         safe_filename = "".join([c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in file.filename])
         storage_path = f"{document_id}/{safe_filename}"
         
-        # Try to get the admin client first, fall back to regular client
-        try:
-            supabase = get_admin_db()
-            logger.info("Using admin client for database operations")
-        except Exception as admin_error:
-            logger.warning(f"Could not get admin client: {str(admin_error)}. Falling back to regular client.")
-            supabase = get_db()
+        # Get regular Supabase client - we'll try admin client for DB operations later
+        supabase = get_db()
         
         # Try to upload the file
         try:
@@ -81,24 +76,31 @@ async def upload_document(
                 # Don't fail the upload, just note the processing error
         
         # Handle the user_id properly - ensure it's a UUID if the database expects a UUID
-        # Check the type of current_user["id"] and convert if needed
         try:
-            # If it's already a UUID object, use it directly
+            # If current_user["id"] is already a UUID object, use it directly
             if isinstance(current_user["id"], uuid.UUID):
                 current_user_id = current_user["id"]
             # If it's a string representation of a UUID, convert it
             else:
-                current_user_id = uuid.UUID(current_user["id"])
+                current_user_id = uuid.UUID(str(current_user["id"]))
             
-            logger.info(f"Using user ID: {current_user_id} (type: {type(current_user_id)})")
+            logger.info(f"Using user ID: {current_user_id} (type: {type(current_user_id).__name__})")
         except Exception as uid_error:
             logger.error(f"Error converting user ID: {str(uid_error)}")
             # Fall back to using it as-is
             current_user_id = current_user["id"]
-            logger.info(f"Falling back to user ID as-is: {current_user_id} (type: {type(current_user_id)})")
+            logger.info(f"Falling back to user ID as-is: {current_user_id} (type: {type(current_user_id).__name__})")
         
-        # Now create the document record in the database
+        # Now create the document record in the database - try admin client first
         try:
+            # Try to get admin client to bypass RLS
+            try:
+                db_client = get_admin_db()
+                logger.info("Using admin client for database operations")
+            except Exception:
+                logger.warning("Could not get admin client, falling back to regular client")
+                db_client = get_db()
+            
             # Prepare document record with fields that match the database schema
             doc_record = {
                 "id": document_id,
@@ -116,10 +118,10 @@ async def upload_document(
             
             # Log the document record being inserted
             logger.info(f"Inserting document record with fields: {', '.join(doc_record.keys())}")
-            logger.info(f"user_id type: {type(doc_record['user_id'])}")
+            logger.info(f"user_id type: {type(doc_record['user_id']).__name__}")
             
             # Attempt to insert document record 
-            db_response = supabase.table("documents").insert(doc_record).execute()
+            db_response = db_client.table("documents").insert(doc_record).execute()
             logger.info(f"Document record created in database")
         except Exception as db_error:
             logger.error(f"Database error: {str(db_error)}")
