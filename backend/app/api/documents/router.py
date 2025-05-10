@@ -15,6 +15,37 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# In your /api/v1/documents/router.py file
+
+@router.get("/")
+async def list_documents(
+    current_user: dict = Depends(get_current_active_user)
+) -> List[Dict[str, Any]]:
+    """List all documents for the current user"""
+    # Get database connection
+    supabase = get_db()
+    user_id = current_user.get("id")
+    
+    # Fetch documents for the user
+    try:
+        admin_db = get_admin_db()
+        if admin_db:
+            logging.info("Using admin client for document listing")
+            response = admin_db.table("documents").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        else:
+            logging.warning("Admin database client not available, falling back to regular client")
+            response = supabase.table("documents").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+    except Exception as e:
+        logging.error(f"Error fetching documents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching documents: {str(e)}"
+        )
+    
+    if response.data:
+        return response.data
+    return []
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
