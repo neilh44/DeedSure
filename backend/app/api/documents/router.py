@@ -1,21 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from typing import List, Dict, Any
-import uuid
-from datetime import datetime
+import uuid  # Make sure this is imported
 import logging
-from app.core.database import get_db
+from app.core.database import get_db, get_admin_db, get_current_active_user
 from app.services.document_processor import DocumentProcessor
-
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)  # Create a logger instance
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_active_user)
 ) -> Dict[str, Any]:
     try:
         logger.info(f"Starting upload for file: {file.filename}")
@@ -31,8 +30,13 @@ async def upload_document(
         safe_filename = "".join([c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in file.filename])
         storage_path = f"{document_id}/{safe_filename}"
         
-        # Get Supabase client
-        supabase = get_db()
+        # Try to get the admin client first, fall back to regular client
+        try:
+            supabase = get_admin_db()
+            logger.info("Using admin client for database operations")
+        except Exception as admin_error:
+            logger.warning(f"Could not get admin client: {str(admin_error)}. Falling back to regular client.")
+            supabase = get_db()
         
         # Try to upload the file
         try:
@@ -46,12 +50,8 @@ async def upload_document(
             logger.info(f"File uploaded successfully: {storage_response}")
             
             # Get the file URL
-            try:
-                storage_url = supabase.storage.from_("deedsure").get_public_url(storage_path)
-                logger.info(f"File URL: {storage_url}")
-            except Exception as url_error:
-                logger.error(f"Error getting URL: {str(url_error)}")
-                storage_url = None
+            storage_url = supabase.storage.from_("deedsure").get_public_url(storage_path)
+            logger.info(f"File URL: {storage_url}")
         except Exception as storage_error:
             logger.error(f"Storage error: {str(storage_error)}")
             raise HTTPException(
@@ -80,20 +80,34 @@ async def upload_document(
                 logger.error(f"Processing error: {str(processing_error)}")
                 # Don't fail the upload, just note the processing error
         
-        # Temporary hard-coded user ID for development
-        current_user_id = "00000000-0000-0000-0000-000000000000"  # Replace with real auth later
+        # Handle the user_id properly - ensure it's a UUID if the database expects a UUID
+        # Check the type of current_user["id"] and convert if needed
+        try:
+            # If it's already a UUID object, use it directly
+            if isinstance(current_user["id"], uuid.UUID):
+                current_user_id = current_user["id"]
+            # If it's a string representation of a UUID, convert it
+            else:
+                current_user_id = uuid.UUID(current_user["id"])
+            
+            logger.info(f"Using user ID: {current_user_id} (type: {type(current_user_id)})")
+        except Exception as uid_error:
+            logger.error(f"Error converting user ID: {str(uid_error)}")
+            # Fall back to using it as-is
+            current_user_id = current_user["id"]
+            logger.info(f"Falling back to user ID as-is: {current_user_id} (type: {type(current_user_id)})")
         
         # Now create the document record in the database
         try:
             # Prepare document record with fields that match the database schema
             doc_record = {
                 "id": document_id,
-                "user_id": current_user_id,
+                "user_id": current_user_id,  # This should now be the correct type (UUID)
                 "filename": file.filename,
-                "file_path": storage_path,  # Changed from storage_path to file_path to match DB
+                "file_path": storage_path,
                 "content_type": file.content_type,
-                "file_size": file_size,  # Using file_size instead of size
-                "file_size_bytes": file_size,  # Also set file_size_bytes for larger files
+                "file_size": file_size,
+                "file_size_bytes": file_size,
                 "category": category,
                 "status": "processed" if extracted_text else "uploaded",
                 "extracted_text": extracted_text,
@@ -102,8 +116,9 @@ async def upload_document(
             
             # Log the document record being inserted
             logger.info(f"Inserting document record with fields: {', '.join(doc_record.keys())}")
+            logger.info(f"user_id type: {type(doc_record['user_id'])}")
             
-            # Insert document record
+            # Attempt to insert document record 
             db_response = supabase.table("documents").insert(doc_record).execute()
             logger.info(f"Document record created in database")
         except Exception as db_error:
@@ -113,6 +128,13 @@ async def upload_document(
                 supabase.storage.from_("deedsure").remove([storage_path])
             except Exception as cleanup_error:
                 logger.error(f"Error cleaning up file: {str(cleanup_error)}")
+            
+            # If using non-admin client, provide a more specific error message
+            if "violates row-level security policy" in str(db_error).lower():
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Permission denied: This operation requires admin privileges or updated RLS policies"
+                )
             
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
