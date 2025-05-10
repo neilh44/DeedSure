@@ -10,4 +10,14 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  preview: {
+    allowedHosts: [
+      'localhost',
+      'deedsure-client.onrender.com'
+    ],
+  },
+  server: {
+    host: true,
+    cors: true,
+  },
 })
