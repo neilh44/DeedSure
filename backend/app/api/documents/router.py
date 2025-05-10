@@ -37,14 +37,10 @@ async def upload_document(
         
         # Skip the test for now and directly try to upload
         try:
-            # Convert the bytes to a file-like object
-            file_obj = io.BytesIO(contents)
-            file_obj.seek(0)  # Ensure we're at the start of the file
-            
-            # Upload directly - fix the file_options parameter
+            # Upload directly using the raw bytes
             storage_response = supabase.storage.from_("deedsure").upload(
                 path=storage_path,
-                file=file_obj,
+                file=contents,  # Pass the raw bytes instead of BytesIO
                 file_options={"content_type": file.content_type}
             )
             
