@@ -100,7 +100,7 @@ async def generate_report(
             detail=f"Error generating report: {str(e)}"
         )
 
-@router.get("/")
+@router.get("")
 async def list_reports() -> List[Dict[str, Any]]:
     # Initialize Supabase client
     supabase = get_db()
