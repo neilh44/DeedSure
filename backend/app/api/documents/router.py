@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-@router.get("/")
+@router.get("")
 async def list_documents(
     current_user: dict = Depends(get_current_active_user)
 ) -> List[Dict[str, Any]]:
