@@ -3,7 +3,6 @@ from datetime import datetime
 import uuid
 import logging
 from .llm_service import LLMService
-from .document_processor import DocumentProcessor
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -71,8 +70,8 @@ class ReportGenerator:
             "id": report_id,
             "created_at": datetime.now().isoformat(),
             "content": report_content,
-            "status": "completed",
-            "source_document_count": len(processed_texts)
+            "status": "completed"
+            # Removed source_document_count as it's not in the schema
         }
         
         # Extract title if possible, with better handling
@@ -89,6 +88,12 @@ class ReportGenerator:
         else:
             report["title"] = f"Title Report - {datetime.now().strftime('%Y-%m-%d')}"
         
+        # Add source document count to metadata instead
+        if metadata is None:
+            metadata = {}
+        
+        metadata["source_document_count"] = len(processed_texts)
+        
         # Add any additional metadata with validation
         if metadata and isinstance(metadata, dict):
             # Ensure metadata doesn't contain any invalid types for JSON
@@ -100,58 +105,3 @@ class ReportGenerator:
             
         logger.info(f"Generated report with ID: {report_id}")
         return report
-        
-    # Add a method to handle API endpoint compatibility
-    async def generate_report_for_api(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Adapter method to handle API request data format
-        
-        Args:
-            request_data: The request data from the API
-            
-        Returns:
-            Properly formatted report
-        """
-        # Extract necessary fields from request data
-        logger.info(f"Processing API request data: {request_data.keys() if request_data else 'None'}")
-        
-        # Basic validation
-        if not request_data:
-            logger.error("Empty request data")
-            raise ValueError("Request data is empty")
-            
-        # Extract document texts - handle different possible formats
-        document_texts = []
-        if "documents" in request_data:
-            # Standard format
-            document_texts = request_data.get("documents", [])
-            logger.info(f"Found {len(document_texts)} documents in standard format")
-        elif "document_ids" in request_data:
-            # Format with document IDs - would need to fetch documents
-            logger.error("Request format with document_ids is not supported yet")
-            raise ValueError("Request format with document_ids is not supported yet")
-        elif "document_texts" in request_data:
-            # Alternative format
-            document_texts = request_data.get("document_texts", [])
-            logger.info(f"Found {len(document_texts)} documents in alternative format")
-        
-        # Extract metadata
-        metadata = request_data.get("metadata", {})
-        
-        # Validate required fields
-        if not document_texts:
-            logger.error("No documents provided in request")
-            raise ValueError("No documents provided in request")
-            
-        # Call main report generation method
-        try:
-            report = await self.generate_report(document_texts, metadata)
-            logger.info("Report generated successfully")
-            # Format for API response
-            return {
-                "success": True,
-                "report": report
-            }
-        except Exception as e:
-            logger.error(f"Failed to generate report: {str(e)}")
-            raise ValueError(f"Failed to generate report: {str(e)}")

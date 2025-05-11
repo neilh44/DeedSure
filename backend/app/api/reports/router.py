@@ -194,10 +194,16 @@ async def generate_report(
         # Initialize report generator
         report_generator = ReportGenerator()
         
+        # Prepare metadata with document IDs
+        metadata = request_data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["document_ids"] = document_ids
+        
         # Generate the report
         try:
             logging.info(f"Generating report from {len(document_texts)} document texts")
-            report_data = await report_generator.generate_report(document_texts, request_data.get("metadata", {}))
+            report_data = await report_generator.generate_report(document_texts, metadata)
             logging.info("Report generation completed successfully")
         except Exception as e:
             logging.error(f"Error in report generation: {str(e)}")
@@ -211,6 +217,18 @@ async def generate_report(
         report_data["id"] = report_id
         report_data["user_id"] = str(user_id)
         
+        # Remove any fields that don't exist in the database schema
+        # Keep only fields that we know exist in the reports table
+        safe_report_data = {
+            "id": report_data.get("id"),
+            "user_id": report_data.get("user_id"),
+            "title": report_data.get("title"),
+            "content": report_data.get("content"),
+            "status": report_data.get("status", "completed"),
+            "created_at": report_data.get("created_at", datetime.now().isoformat()),
+            "metadata": report_data.get("metadata", {})
+        }
+        
         # Get database connection for storing the report
         try:
             # Try to use admin client to bypass RLS
@@ -222,20 +240,9 @@ async def generate_report(
                 db_client = supabase
                 logging.warning("Admin database client not available, falling back to regular client")
             
-            # Start a transaction by using the low-level postgrest client
-            # Insert the report
-            db_response = db_client.table("reports").insert(report_data).execute()
+            # Insert the report with only the fields that exist in the schema
+            db_response = db_client.table("reports").insert(safe_report_data).execute()
             logging.info(f"Report record created in database with ID: {report_id}")
-            
-            # Now create entries in the join table for each document
-            for doc_id in document_ids:
-                join_record = {
-                    "report_id": report_id,
-                    "document_id": doc_id
-                }
-                join_response = db_client.table("report_documents").insert(join_record).execute()
-                logging.info(f"Created join record for report {report_id} and document {doc_id}")
-                
         except Exception as db_error:
             logging.error(f"Database error: {str(db_error)}")
             raise HTTPException(
@@ -243,13 +250,13 @@ async def generate_report(
                 detail=f"Failed to save report: {str(db_error)}"
             )
         
-        # Return success response with the report data and document IDs
+        # Include document IDs in the response
+        response_data = safe_report_data.copy()
+        response_data["document_ids"] = document_ids
+        
         return {
             "success": True,
-            "report": {
-                **report_data,
-                "document_ids": document_ids  # Include document IDs in response, but not in DB
-            }
+            "report": response_data
         }
         
     except HTTPException:
@@ -266,3 +273,5 @@ async def generate_report(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating report: {str(e)}"
         )
+    
+    
