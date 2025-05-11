@@ -17,7 +17,7 @@ router = APIRouter()
 async def list_reports(
     current_user: dict = Depends(get_current_active_user)
 ) -> List[Dict[str, Any]]:
-    """List all reports for the current user"""
+    """List all reports for the current user with document counts"""
     user_id = current_user.get("id")
     logging.info(f"Listing reports for user ID: {user_id}")
     
@@ -29,31 +29,43 @@ async def list_reports(
         admin_db = get_admin_db()
         if admin_db:
             logging.info("Using admin client for report listing")
-            response = admin_db.table("reports").select("*").eq("user_id", user_id).execute()
+            response = admin_db.table("reports").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
         else:
             logging.warning("Admin database client not available, falling back to regular client")
-            response = supabase.table("reports").select("*").eq("user_id", user_id).execute()
+            response = supabase.table("reports").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
         
         # Log the response
-        logging.info(f"Reports response data: {response.data if response.data else 'None'}")
         logging.info(f"Reports count: {len(response.data) if response.data else 0}")
         
-        if response.data:
-            return response.data
-        return []
+        if not response.data:
+            return []
+        
+        reports = response.data
+        
+        # For each report, fetch document count
+        for report in reports:
+            try:
+                count_response = supabase.table("report_documents").select("count", count="exact").eq("report_id", report["id"]).execute()
+                document_count = count_response.count if hasattr(count_response, 'count') else 0
+                report["document_count"] = document_count
+            except Exception as count_error:
+                logging.error(f"Error fetching document count for report {report['id']}: {str(count_error)}")
+                report["document_count"] = 0
+        
+        return reports
     except Exception as e:
         logging.error(f"Error fetching reports: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching reports: {str(e)}"
         )
-
+    
 @router.get("/{report_id}")
 async def get_report(
     report_id: str,
     current_user: dict = Depends(get_current_active_user)
 ) -> Dict[str, Any]:
-    """Get a specific report by ID"""
+    """Get a specific report by ID with related documents"""
     user_id = current_user.get("id")
     logging.info(f"Fetching report ID: {report_id} for user ID: {user_id}")
     
@@ -84,6 +96,33 @@ async def get_report(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have permission to access this report"
             )
+        
+        # Fetch associated documents from the join table
+        try:
+            # Get document IDs from join table
+            join_response = supabase.table("report_documents").select("document_id").eq("report_id", report_id).execute()
+            
+            document_ids = []
+            if join_response.data:
+                document_ids = [item["document_id"] for item in join_response.data]
+            
+            # If document IDs found, fetch document details
+            documents = []
+            if document_ids:
+                for doc_id in document_ids:
+                    doc_response = supabase.table("documents").select("id,filename,category,content_type,file_size").eq("id", doc_id).execute()
+                    if doc_response.data and doc_response.data[0]:
+                        documents.append(doc_response.data[0])
+            
+            # Add document info to the report
+            report["documents"] = documents
+            report["document_ids"] = document_ids
+            
+        except Exception as doc_error:
+            logging.error(f"Error fetching associated documents: {str(doc_error)}")
+            # Don't fail the request, just note that documents couldn't be fetched
+            report["documents"] = []
+            report["document_ids"] = []
             
         return report
         
@@ -171,8 +210,6 @@ async def generate_report(
         report_id = report_data.get("id", str(uuid.uuid4()))
         report_data["id"] = report_id
         report_data["user_id"] = str(user_id)
-        report_data["created_at"] = datetime.now().isoformat()
-        report_data["document_ids"] = document_ids
         
         # Get database connection for storing the report
         try:
@@ -185,9 +222,20 @@ async def generate_report(
                 db_client = supabase
                 logging.warning("Admin database client not available, falling back to regular client")
             
+            # Start a transaction by using the low-level postgrest client
             # Insert the report
             db_response = db_client.table("reports").insert(report_data).execute()
             logging.info(f"Report record created in database with ID: {report_id}")
+            
+            # Now create entries in the join table for each document
+            for doc_id in document_ids:
+                join_record = {
+                    "report_id": report_id,
+                    "document_id": doc_id
+                }
+                join_response = db_client.table("report_documents").insert(join_record).execute()
+                logging.info(f"Created join record for report {report_id} and document {doc_id}")
+                
         except Exception as db_error:
             logging.error(f"Database error: {str(db_error)}")
             raise HTTPException(
@@ -195,9 +243,13 @@ async def generate_report(
                 detail=f"Failed to save report: {str(db_error)}"
             )
         
+        # Return success response with the report data and document IDs
         return {
             "success": True,
-            "report": report_data
+            "report": {
+                **report_data,
+                "document_ids": document_ids  # Include document IDs in response, but not in DB
+            }
         }
         
     except HTTPException:
