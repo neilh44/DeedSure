@@ -194,16 +194,10 @@ async def generate_report(
         # Initialize report generator
         report_generator = ReportGenerator()
         
-        # Prepare metadata with document IDs
-        metadata = request_data.get("metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        metadata["document_ids"] = document_ids
-        
-        # Generate the report
+        # Generate the report - note we're no longer passing metadata
         try:
             logging.info(f"Generating report from {len(document_texts)} document texts")
-            report_data = await report_generator.generate_report(document_texts, metadata)
+            report_data = await report_generator.generate_report(document_texts)
             logging.info("Report generation completed successfully")
         except Exception as e:
             logging.error(f"Error in report generation: {str(e)}")
@@ -213,21 +207,7 @@ async def generate_report(
             )
         
         # Add user ID to report data
-        report_id = report_data.get("id", str(uuid.uuid4()))
-        report_data["id"] = report_id
         report_data["user_id"] = str(user_id)
-        
-        # Remove any fields that don't exist in the database schema
-        # Keep only fields that we know exist in the reports table
-        safe_report_data = {
-            "id": report_data.get("id"),
-            "user_id": report_data.get("user_id"),
-            "title": report_data.get("title"),
-            "content": report_data.get("content"),
-            "status": report_data.get("status", "completed"),
-            "created_at": report_data.get("created_at", datetime.now().isoformat()),
-            "metadata": report_data.get("metadata", {})
-        }
         
         # Get database connection for storing the report
         try:
@@ -240,9 +220,9 @@ async def generate_report(
                 db_client = supabase
                 logging.warning("Admin database client not available, falling back to regular client")
             
-            # Insert the report with only the fields that exist in the schema
-            db_response = db_client.table("reports").insert(safe_report_data).execute()
-            logging.info(f"Report record created in database with ID: {report_id}")
+            # Insert the report
+            db_response = db_client.table("reports").insert(report_data).execute()
+            logging.info(f"Report record created in database with ID: {report_data['id']}")
         except Exception as db_error:
             logging.error(f"Database error: {str(db_error)}")
             raise HTTPException(
@@ -250,8 +230,8 @@ async def generate_report(
                 detail=f"Failed to save report: {str(db_error)}"
             )
         
-        # Include document IDs in the response
-        response_data = safe_report_data.copy()
+        # Add document IDs to the response (but not to the database)
+        response_data = report_data.copy()
         response_data["document_ids"] = document_ids
         
         return {
@@ -273,5 +253,3 @@ async def generate_report(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating report: {str(e)}"
         )
-    
-    

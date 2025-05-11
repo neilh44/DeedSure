@@ -14,14 +14,12 @@ class ReportGenerator:
         self.llm_service = LLMService()
         
     async def generate_report(self, 
-                              document_texts: List[str], 
-                              metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                              document_texts: List[str]) -> Dict[str, Any]:
         """
         Generate a title search report from document texts
         
         Args:
             document_texts: List of extracted document texts
-            metadata: Optional additional metadata to include
             
         Returns:
             Dict containing report data
@@ -64,14 +62,13 @@ class ReportGenerator:
             logger.error(f"LLM analysis failed: {str(e)}")
             raise ValueError(f"Failed to analyze documents: {str(e)}")
         
-        # Create report object with properly formatted data
+        # Create report object with only the fields we know exist in the database
         report_id = str(uuid.uuid4())
         report = {
             "id": report_id,
             "created_at": datetime.now().isoformat(),
             "content": report_content,
             "status": "completed"
-            # Removed source_document_count as it's not in the schema
         }
         
         # Extract title if possible, with better handling
@@ -87,21 +84,6 @@ class ReportGenerator:
             report["title"] = f"Title Report - {title_line[:50]}"
         else:
             report["title"] = f"Title Report - {datetime.now().strftime('%Y-%m-%d')}"
-        
-        # Add source document count to metadata instead
-        if metadata is None:
-            metadata = {}
-        
-        metadata["source_document_count"] = len(processed_texts)
-        
-        # Add any additional metadata with validation
-        if metadata and isinstance(metadata, dict):
-            # Ensure metadata doesn't contain any invalid types for JSON
-            sanitized_metadata = {}
-            for key, value in metadata.items():
-                if isinstance(value, (str, int, float, bool, list, dict)) or value is None:
-                    sanitized_metadata[key] = value
-            report["metadata"] = sanitized_metadata
             
         logger.info(f"Generated report with ID: {report_id}")
         return report
