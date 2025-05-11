@@ -49,6 +49,61 @@ async def list_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching documents: {str(e)}"
         )
+@router.get("/{document_id}")
+async def get_document(
+    document_id: str,
+    current_user: dict = Depends(get_current_active_user)
+) -> Dict[str, Any]:
+    """Get a specific document by ID"""
+    user_id = current_user.get("id")
+    logging.info(f"Fetching document ID: {document_id} for user ID: {user_id}")
+    
+    # Get database connection
+    supabase = get_db()
+    
+    try:
+        # Try to use admin client first
+        admin_db = get_admin_db()
+        if admin_db:
+            logging.info("Using admin client for document fetch")
+            # Get document and verify it belongs to the current user
+            response = admin_db.table("documents").select("*").eq("id", document_id).execute()
+        else:
+            logging.warning("Admin database client not available, falling back to regular client")
+            # Regular client with RLS will automatically filter by user_id
+            response = supabase.table("documents").select("*").eq("id", document_id).execute()
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        document = response.data[0]
+        
+        # If using admin client, manually verify the document belongs to the current user
+        if admin_db and document.get("user_id") != str(user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this document"
+            )
+        
+        # Get storage URL
+        storage_path = document.get("file_path")
+        if storage_path:
+            document["storage_url"] = supabase.storage.from_("deedsure").get_public_url(storage_path)
+        
+        return document
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logging.error(f"Error fetching document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching document: {str(e)}"
+        )
 
 @router.post("/upload")
 async def upload_document(
