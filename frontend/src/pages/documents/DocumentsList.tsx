@@ -3,26 +3,28 @@ import { Link } from 'react-router-dom'
 import { File, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import api from '@/lib/api'
-import { formatDate } from '@/lib/utils'
 
-interface Document {
+interface DocumentItem {
   id: string
   filename: string
   upload_date: string
   status: string
 }
 
-export default function DocumentsList() {
-  const [documents, setDocuments] = useState<Document[]>([])
+export function DocumentsList() {
+  const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchDocuments = async () => {
       try {
+        setIsLoading(true)
         const response = await api.get('/documents')
         setDocuments(response.data)
       } catch (error) {
         console.error('Error fetching documents:', error)
+        setError('Failed to load documents')
       } finally {
         setIsLoading(false)
       }
@@ -42,72 +44,64 @@ export default function DocumentsList() {
           </Button>
         </Link>
       </div>
-      
-      <div className="rounded-lg bg-white shadow">
-        <div className="overflow-hidden rounded-md border">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-300">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th scope="col" className="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6">
-                    File Name
-                  </th>
-                  <th scope="col" className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Status
-                  </th>
-                  <th scope="col" className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Uploaded
-                  </th>
-                  <th scope="col" className="relative py-3.5 pl-3 pr-4 sm:pr-6">
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 bg-white">
-                {isLoading ? (
-                  <tr>
-                    <td colSpan={4} className="py-10 text-center text-sm text-gray-500">
-                      Loading documents...
-                    </td>
-                  </tr>
-                ) : documents.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="py-10 text-center text-sm text-gray-500">
-                      No documents found. Upload your first document to get started.
-                    </td>
-                  </tr>
-                ) : (
-                  documents.map((document) => (
-                    <tr key={document.id}>
-                      <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm sm:pl-6">
-                        <div className="flex items-center">
-                          <File className="mr-2 h-5 w-5 flex-shrink-0 text-gray-400" />
-                          <div className="font-medium text-gray-900">{document.filename}</div>
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                        <span className="inline-flex rounded-full bg-green-100 px-2 text-xs font-semibold leading-5 text-green-800">
-                          {document.status}
-                        </span>
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                        {formatDate(document.upload_date)}
-                      </td>
-                      <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6">
-                        <Link
-                          to={`/documents/${document.id}`}
-                          className="text-blue-600 hover:text-blue-900"
-                        >
-                          View
-                        </Link>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white">
+        <div className="grid grid-cols-12 gap-4 border-b border-gray-200 bg-gray-50 px-6 py-3">
+          <div className="col-span-7 text-sm font-medium text-gray-900">File Name</div>
+          <div className="col-span-2 text-sm font-medium text-gray-900">Status</div>
+          <div className="col-span-2 text-sm font-medium text-gray-900">Uploaded</div>
+          <div className="col-span-1 text-sm font-medium text-gray-900"></div>
         </div>
+
+        {isLoading ? (
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-gray-500">Loading documents...</p>
+          </div>
+        ) : error ? (
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-red-500">{error}</p>
+          </div>
+        ) : documents.length === 0 ? (
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-gray-500">No documents found</p>
+          </div>
+        ) : (
+          <div className="max-h-[calc(100vh-250px)] overflow-y-auto">
+            {documents.map((doc) => (
+              <div
+                key={doc.id}
+                className="grid grid-cols-12 gap-4 border-b border-gray-200 px-6 py-4 hover:bg-gray-50"
+              >
+                <div className="col-span-7 flex items-center">
+                  <File className="mr-3 h-5 w-5 flex-shrink-0 text-gray-400" />
+                  <span className="truncate text-sm text-gray-900">{doc.filename}</span>
+                </div>
+                <div className="col-span-2">
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                    doc.status === 'processed' 
+                      ? 'bg-green-100 text-green-800' 
+                      : doc.status === 'uploaded' 
+                      ? 'bg-blue-100 text-blue-800' 
+                      : 'bg-gray-100 text-gray-800'
+                  }`}>
+                    {doc.status}
+                  </span>
+                </div>
+                <div className="col-span-2 text-sm text-gray-500">
+                  {doc.upload_date ? new Date(doc.upload_date).toLocaleDateString() : 'Invalid Date'}
+                </div>
+                <div className="col-span-1 text-right">
+                  <Link
+                    to={`/documents/${doc.id}`}
+                    className="text-sm font-medium text-blue-600 hover:text-blue-800"
+                  >
+                    View
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
