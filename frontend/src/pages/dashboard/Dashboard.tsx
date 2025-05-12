@@ -109,7 +109,7 @@ export default function Dashboard() {
             <div className="p-6">
               <h3 className="text-base font-medium text-gray-900">Recent Documents</h3>
               <div className="mt-6 flow-root">
-                <ul className="-my-5 divide-y divide-gray-200">
+                <ul className="-my-5 divide-y divide-gray-200 h-64 overflow-y-auto pr-2">
                   {isLoading ? (
                     <p className="py-4 text-sm text-gray-500">Loading...</p>
                   ) : recentDocuments.length === 0 ? (
@@ -159,7 +159,7 @@ export default function Dashboard() {
             <div className="p-6">
               <h3 className="text-base font-medium text-gray-900">Recent Reports</h3>
               <div className="mt-6 flow-root">
-                <ul className="-my-5 divide-y divide-gray-200">
+                <ul className="-my-5 divide-y divide-gray-200 h-64 overflow-y-auto pr-2">
                   {isLoading ? (
                     <p className="py-4 text-sm text-gray-500">Loading...</p>
                   ) : recentReports.length === 0 ? (
