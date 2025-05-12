@@ -18,7 +18,7 @@ export default function ReportView() {
   const { id } = useParams<{ id: string }>()
   const [report, setReport] = useState<Report | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [pollingInterval, setPollingInterval] = useState<number | null>(null)
 
   useEffect(() => {
@@ -196,7 +196,7 @@ const [error, setError] = useState<string | null>(null)
               </div>
             ) : (
               <div className="prose prose-blue max-w-none rounded-lg border border-gray-200 bg-white p-8">
-                <div className="whitespace-pre-wrap">
+                <div className="max-h-[calc(100vh-300px)] overflow-y-auto whitespace-pre-wrap pr-2">
                   {report.content}
                 </div>
               </div>
