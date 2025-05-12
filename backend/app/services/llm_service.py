@@ -71,57 +71,79 @@ class LLMService:
         combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(document_texts)
         
         prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches. 
-        Analyze the following property documents to generate a comprehensive title report.
-
-        ## Instructions:
-        1. Extract all relevant property details (IDs, measurements, locations)
-        2. Identify all parties in the chain of title chronologically
-        3. Note all transfers, deeds, and official registrations with dates
-        4. Document any encumbrances, restrictions or claims
-        5. Flag any potential title issues or missing information
-        6. Format the report according to the standardized template below
+        You are an expert legal document specialist with deep knowledge of Indian property law, title searches, and land record documentation. Generate a comprehensive Title Search Report (TSR) based on the following property documents:
 
         ## Document Content:
         {combined_text}
 
-        ## Title Report Format:
+        Follow these instructions to create your report:
 
-        # REPORT ON TITLE
+        1. Create a professional header with:
+           - Title "TITLE SEARCH REPORT (TSR)" 
+           - Addressee (Branch Manager and financial institution)
+           - Your details as legal professional with contact information
+
+        2. Extract and document all property identifiers including:
+           - Survey/Block numbers (both new and old)
+           - City Survey numbers and area measurements
+           - Complete location details (Village/Mouje, Taluka, District, Sub-District)
+           - Property boundaries in all four directions
+
+        3. Document the chain of title chronologically by:
+           - Starting with earliest recorded owners
+           - Including all mutation entries with numbers and dates
+           - Documenting resurvey proceedings and resulting allocations
+           - Including all Ganot Cases or special land proceedings
+
+        4. List all examined documents with their details:
+           - Original Sale/Lease Deed numbers with execution dates
+           - Power of Attorney documents with precise dates
+           - Indemnity Bonds and other supporting documents
+           - Village forms and City Survey Property Cards
+
+        5. Clearly state the encumbrance status and note:
+           - Any existing mortgages, liens, or charges
+           - Any restrictions on title or land usage
+           - Outstanding claims or notices against the property
+
+        6. Provide specific security recommendations for:
+           - Protecting the financial institution's interests
+           - Necessary regulatory compliance steps
+           - Required tax documentation and verification
+
+        # TITLE SEARCH REPORT (TSR)
+
+        To: [Branch Manager Name and Financial Institution]  
+        From: [Legal Professional's Name, Designation and Contact Details]
+
+        ### 1. Document Receipt and Handover Details
+        [Table format with dates and officials involved]
+
+        ### 2. Borrower/Mortgagor Details
+        [Account holder and property owner details]
+
+        ### 3. Property Description
+        3.1 Nature of property: [N.A. Land/Agricultural/Residential etc.]
+        3.2 Survey/Block Numbers: [All relevant survey numbers with old/new designations]
+        3.3 Boundaries and Measurement: [Complete boundary description with directions]
+
+        ### 4. Title Tracing
+        [Chronological narrative of ownership with all mutation entries, dates and legal proceedings]
+
+        ### 5. Documents Examined
+        [Numbered list of all legal documents with their registration details]
+
+        ### 6. Encumbrance Certificate
+        [Clear statement about presence or absence of encumbrances]
+
+        ### 7. Recommendations
+        [Specific suggestions to protect lender's interests]
+
         Date: [Current Date]
-
-        Re.: [Include detailed property description with Survey/Block numbers, measurements, location details, and current owner information]
-
-        That we have caused necessary searches to be taken with the available Revenue records and Sub-Registry Records for a period of last more than Thirty Years and on perusal and verification of documents of title deeds produced to us, we give our report on title in respect of said land as under:
-
-        1. [Original ownership details]
-
-        2. [Chronological chain of title with numbered points]
-           - Include all transfers with dates
-           - Registration details (serial numbers, dates)
-           - Mutation entry details
-           - Inheritance information where applicable
-           - Conversion details (if applicable)
-           - Town Planning Scheme allocations (if applicable)
-
-        [Continue numbered sequence for complete chain of title]
-
-        [Public notice details if applicable]
-
-        [Declaration details if applicable]
-
-        THE SCHEDULE ABOVE REFERRED TO
-
-        ALL THAT piece and parcel of [land classification] bearing [survey/plot numbers] admeasuring [measurements] of [location details] and the same is bounded as follows:
-
-        On or towards the East  : [boundary]
-        On or towards the West  : [boundary]
-        On or towards the North : [boundary]
-        On or towards the South : [boundary]
-
-        [Note any limitations or special considerations]
+        Place: [Location]
 
         [Signature Block]
+        Advocate/Legal Consultant
         """
         
         # Estimate tokens for this request (prompt + system message)
@@ -141,7 +163,7 @@ class LLMService:
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=8000,
+            max_tokens=5000,
             temperature=0.2
         )
         
