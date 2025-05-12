@@ -11,7 +11,7 @@ interface DocumentItem {
   status: string
 }
 
-export function DocumentsList() {
+export default function DocumentsList() {
   const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
