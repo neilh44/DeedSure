@@ -101,7 +101,7 @@ export default function ReportCreate() {
             </div>
           ) : (
             <div className="overflow-hidden rounded-md border">
-              <ul className="divide-y divide-gray-200">
+              <ul className="divide-y divide-gray-200 max-h-[calc(100vh-350px)] overflow-y-auto pr-2">
                 {documents.map((document) => (
                   <li key={document.id} className="flex items-center p-4 hover:bg-gray-50">
                     <div className="flex h-6 items-center">
