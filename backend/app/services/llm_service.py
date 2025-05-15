@@ -14,7 +14,7 @@ class LLMService:
     def __init__(self):
         self.client = groq.Client(api_key=settings.GROQ_API_KEY)
         self.model = settings.LLM_MODEL
-        self.token_limit_per_request = 6000  # Keep per-request token limit for batching
+        self.token_limit_per_request = 29000  # Keep per-request token limit for batching
         
         logger.info(f"LLMService initialized with model {self.model}")
     
