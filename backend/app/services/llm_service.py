@@ -45,89 +45,116 @@ class LLMService:
             combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(document_texts)
             
             prompt = f"""
-            Analyze the following property documents to generate a comprehensive title search report.
+            Analyze the following property documents to generate an extremely detailed and comprehensive title search report. Pay particular attention to extracting EVERY entry in the chronological chain of title.
 
             ## Document Content:
             {combined_text}
 
             ## Instructions:
-            Generate a comprehensive title search report by extracting the following information:
+            You must carefully examine all pages of the land record document and extract EVERY detail to produce a comprehensive title search report with the following sections:
 
             1. **Basic Property Identification**
                - Survey/Block Number and UPIN
                - Village, Taluka and District location
                - Any Town Planning/Final Plot numbers
                - Boundaries or neighboring properties (if available)
+               - Detailed property description including location indicators
 
             2. **Area and Assessment**
-               - Total area in relevant measurement units
-               - Assessment amount
-               - Breakdown of area by usage (if applicable)
-               - Land use classification
+               - Total area in relevant measurement units (specify hectares, acres, square meters, etc.)
+               - Assessment amount with currency
+               - Breakdown of area by usage (residential, commercial, etc.)
+               - Land use classification (agricultural, non-agricultural, etc.)
+               - Any other area-related details mentioned in the record
 
             3. **Current Ownership**
-               - Current owner's full name/entity
-               - How ownership was established (sale deed, inheritance, etc.)
-               - Date of current ownership
-               - Transaction details if recent
+               - Current owner's full name/entity with EXACT spelling from the record
+               - How ownership was established (specific sale deed number, inheritance, etc.)
+               - Exact date of current ownership acquisition
+               - Transaction details including consideration amount, registration details
+               - Percentage/share of ownership if multiple owners
 
-            4. **Ownership History and Chain of Title** (CRITICAL SECTION - PROVIDE DETAILED CHRONOLOGICAL HISTORY)
-               - Create a comprehensive chronological chain of title showing ALL ownership changes
-               - For EACH transfer/transaction, include:
-                  * Exact date of transaction
-                  * Entry/note number and its date in the record
-                  * Names of all parties (transferor and transferee)
-                  * Type of transaction (sale, inheritance, court order, etc.)
-                  * Sale consideration amount (if applicable)
-                  * Registration details of deeds/documents
-                  * Survey numbers or plot numbers involved
-                  * Any special conditions of the transfer
-               - Start with the earliest recorded owner and proceed chronologically to present
-               - Include ALL intermediate owners, even for short periods
-               - Document each step in the transfer history with specific reference to entries in the land record
-               - Note any gaps or unclear periods in the ownership history
-               - Pay special attention to ownership percentages/shares if multiple owners
-               - Include ALL court proceedings affecting ownership
+            4. **EXHAUSTIVE Chronological Chain of Title**
+               - Extract EVERY SINGLE entry from the "Entry Details" section of the record
+               - Format as a detailed table with these columns:
+                  * Entry/Note Number
+                  * Entry Date
+                  * Transaction Type
+                  * Transferor(s) (seller/previous owner)
+                  * Transferee(s) (buyer/new owner)
+                  * Transaction Details
+                  * Consideration Amount (if sale)
+                  * Special Conditions or Notes
+               - Present entries in strict chronological order from earliest to most recent
+               - Include ALL entries visible in the document without omitting ANY details
+               - For each entry, explain its significance to the chain of title
+               - Do not summarize or abbreviate entries - include complete information
+               - Ensure proper tracking of ownership shares/percentages when multiple owners
+               - Cross-reference entry numbers mentioned in different sections of the document
 
             5. **Land Status Changes**
-               - Any conversion from agricultural to non-agricultural
-               - Permissions granted with dates and order numbers
-               - Premiums or fees paid for conversion
-               - Development permissions
+               - Detail ALL changes from agricultural to non-agricultural use
+               - Include all permissions with dates, authority granting permission, and order numbers
+               - List all premiums or fees paid for conversion with exact amounts
+               - Document all development permissions with relevant details
+               - Note any conditions attached to conversions or permissions
 
-            6. **Encumbrances and Litigation**
-               - All court cases related to the property
-               - Status of each case and final orders
-               - Any active disputes or pending litigation
-               - Notices, attachments or stays
+            6. **Comprehensive Encumbrances and Litigation History**
+               - Extract ALL court cases from the document with their numbers and dates
+               - Document the complete history of each case including:
+                  * Parties involved
+                  * Nature of dispute
+                  * Filing dates
+                  * Court/authority hearing the case
+                  * Case status (pending, disposed, etc.)
+                  * Final orders with dates and implications
+               - Include ALL entries from the "Boja and Other Rights Details" section
+               - Document ALL notices, attachments, or stays affecting the property
+               - Note ALL mortgage details if mentioned
 
             7. **Rights and Restrictions**
-               - Easements or rights of way
-               - Mortgage or loan details
-               - Government restrictions or conditions
-               - Heritage or environmental restrictions
+               - Document ALL easements or rights of way
+               - Extract ALL mortgage or loan details
+               - List ALL government restrictions or conditions
+               - Note ANY other restrictions on property usage
 
             8. **Revenue and Tax Status**
-               - Current tax assessment
-               - Payment status
+               - Current tax assessment with exact amount
+               - Payment status if mentioned
                - Any arrears or dues
+               - Historical tax assessment changes if available
 
-            9. **Additional Relevant Information**
-               - Historical use of the property
-               - Administrative changes affecting the property
-               - Special conditions or observations
+            9. **Crop and Land Use History**
+               - Extract information from the "Crop Details" section
+               - Document historical crop patterns and land usage
+               - Note irrigation details if mentioned
 
-            10. **Conclusion and Recommendations**
-                - Clear statement on current ownership status
-                - Any red flags or issues requiring attention
-                - Recommendations for further verification
+            10. **Additional Relevant Information**
+                - Document ALL administrative changes affecting the property
+                - Note ALL special conditions or observations
+                - Include ANY other relevant information from the document
 
-            Format the report with clear headings and sections. Include all relevant details found in the documents. 
-            THE CHAIN OF TITLE HISTORY MUST BE DETAILED, PRECISE, AND CHRONOLOGICAL - DO NOT SUMMARIZE OR GENERALIZE THIS SECTION.
+            11. **Conclusion and Recommendations**
+                - Provide a clear statement on current ownership status
+                - List ALL potential red flags or issues requiring attention
+                - Offer specific recommendations for further verification
+                - Comment on the completeness of the title based on the document
+
+            FORMAT REQUIREMENTS:
+            - Begin with a clear title and date of report
+            - Use numbered sections with clear headings
+            - Present the chain of title as a detailed chronological table
+            - For entries with extensive details, provide complete information rather than summarizing
+            - Bold key facts, dates, and figures
+            - Ensure ALL information is directly extracted from the document
+            - DO NOT invent or assume details not present in the document
+            - If information appears to be missing or unclear, explicitly note this
+
+            Your report MUST be EXHAUSTIVE - do not omit ANY details from the document. This report will be used for legal purposes, so accuracy and completeness are absolutely critical.
             """
             
             # Estimate tokens for this request (prompt + system message)
-            system_message = "You are a specialized legal assistant with expertise in property law and title searches. You extract detailed information from land records and generate comprehensive chronological chain of title histories showing every owner and transaction."
+            system_message = "You are an expert legal title examiner with decades of experience in property law, land records, and title searches. You meticulously extract EVERY detail from land records to create exhaustive title reports that document the complete chain of title without omitting any information. Your specialty is creating detailed chronological ownership histories that capture every entry in land records without summarization."
             estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
             
             logger.debug(f"Estimated token usage for request: {estimated_tokens}")
@@ -151,7 +178,7 @@ class LLMService:
                             {"role": "user", "content": prompt}
                         ],
                         max_tokens=8000,
-                        temperature=0.1  # Lower temperature for more precise factual extraction
+                        temperature=0.0  # Zero temperature for maximum factual accuracy
                     )
                     
                     logger.info(f"Analysis completed")
