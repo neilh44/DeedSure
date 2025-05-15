@@ -412,9 +412,181 @@ class LLMService:
                     logger.error("All retry attempts failed for report combination")
                     return f"ERROR: Failed to combine reports: {error_message}"
     
+    async def process_all_documents(self, document_texts: List[str]) -> str:
+        """
+        Process all documents in a single request to the LLM
+        
+        Args:
+            document_texts: List of document text contents
+            
+        Returns:
+            Consolidated title report
+        """
+        if not document_texts:
+            logger.warning("No document texts provided for analysis")
+            return "Error: No documents provided for analysis."
+            
+        logger.info(f"Processing {len(document_texts)} documents in a single request")
+        
+        # Combine all documents with clear separators
+        combined_text = ""
+        for i, doc_text in enumerate(document_texts):
+            combined_text += f"\n\n### DOCUMENT {i+1} ###\n\n{doc_text}\n\n"
+        
+        # Estimate tokens for the combined text
+        estimated_tokens = self._estimate_tokens(combined_text)
+        
+        # Check if combined document is too large
+        if estimated_tokens > self.token_limit_per_request * 0.7:
+            logger.warning(f"Combined documents too large ({estimated_tokens} est. tokens)")
+            logger.info("Falling back to individual document processing")
+            
+            # Process each document individually and then combine results
+            individual_reports = []
+            
+            for i, doc_text in enumerate(document_texts):
+                report = await self.process_single_document(doc_text, i+1)
+                individual_reports.append(report)
+                
+            return await self.combine_reports(individual_reports)
+        
+        # Check rate limit
+        wait_time = self._check_rate_limit(estimated_tokens)
+        if wait_time > 0:
+            logger.info(f"Waiting {wait_time:.2f}s before processing due to rate limits")
+            await asyncio.sleep(wait_time)
+        
+        # Build the prompt with all documents
+        prompt = f"""
+        Analyze the following property documents to generate a detailed comprehensive title report.
+        
+        ## Documents Content:
+        {combined_text}
+        
+        ## Instructions:
+        Create a comprehensive title report with the following sections:
+        
+        1. Basic Property Identification (survey numbers, location)
+        2. Area and Assessment details
+        3. Current Ownership information
+        4. Chronological Chain of Title (as a detailed table)
+        5. Land Status Changes
+        6. Encumbrances and Litigation
+        7. Rights and Restrictions
+        8. Revenue and Tax Status
+        9. Other relevant information
+        10. Conclusion and Recommendations
+        
+        IMPORTANT FORMATTING INSTRUCTIONS:
+        - If multiple documents exist, consolidate information and note which document provides which details
+        - Include ONLY information that is actually present in the documents
+        - Use actual data extracted from the documents
+        - If information is not available, state "Not specified in documents" rather than using placeholders
+        - Bold key facts, dates, and figures
+        - For the Chain of Title table, use markdown table format
+        - Be specific and precise - include actual names, dates, and amounts from the documents
+        - DO NOT use placeholder text like "[Insert X]" or "[Insert date]"
+        - DO NOT create a template - this should be a final report with actual content
+        - When documents contain conflicting information, note the conflicts and indicate the source
+
+        Your response should be a complete, ready-to-read report with real content, not a template.
+        """
+        
+        system_message = "You are an expert legal title examiner with decades of experience in property law and land records. Your task is to extract all relevant details from multiple property documents and create a comprehensive title report with actual content, not templates or placeholders."
+        
+        # Call Groq API with retry mechanism and detailed error handling
+        max_retries = 3
+        backoff_factor = 2
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Sending all documents to Groq API (attempt {attempt + 1}/{max_retries})")
+                
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=8000,
+                    temperature=0.0
+                )
+                
+                # Log complete response details for debugging
+                content = response.choices[0].message.content
+                tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
+                
+                # Log first part of response for debugging
+                logger.debug(f"Raw API response preview: {content[:500]}...")
+                
+                # Check if response is empty or contains placeholders
+                if not content or content.strip() == "":
+                    logger.warning(f"Generated an empty response")
+                    if attempt < max_retries - 1:
+                        logger.info("Retrying with modified prompt...")
+                        continue
+                    return "ERROR: Unable to generate a meaningful report. The response was empty."
+                
+                if "[Insert" in content:
+                    logger.warning(f"Response contains placeholder text")
+                    if attempt < max_retries - 1:
+                        # Add more specific instructions to avoid placeholders for the retry
+                        prompt += "\n\nIMPORTANT: Your response contains placeholder text like '[Insert X]'. DO NOT use ANY placeholders. Only include actual information from the documents or explicitly state 'Information not available in documents'."
+                        logger.info("Retrying with stronger instructions against placeholders...")
+                        continue
+                    else:
+                        # Replace placeholders with better text
+                        content = content.replace("[Insert date]", "Date not specified in documents")
+                        content = content.replace("[Insert", "Not specified in documents (")
+                        content = content.replace("]", ")")
+                
+                # Update rate history
+                self._update_rate_history(tokens_used)
+                
+                logger.info(f"All documents processed successfully in a single request. Content length: {len(content)} chars, Tokens used: {tokens_used}")
+                return content
+                
+            except Exception as e:
+                error_message = str(e)
+                
+                # Extract status code if available
+                status_code = None
+                if hasattr(e, 'status_code'):
+                    status_code = e.status_code
+                elif hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    status_code = e.response.status_code
+                    
+                logger.error(f"API call failed with status code {status_code}: {error_message}")
+                
+                # Check for specific error types
+                if "context_length_exceeded" in error_message:
+                    logger.warning("Context length exceeded. Falling back to individual document processing.")
+                    # Process each document individually and then combine results
+                    individual_reports = []
+                    
+                    for i, doc_text in enumerate(document_texts):
+                        report = await self.process_single_document(doc_text, i+1)
+                        individual_reports.append(report)
+                        
+                    return await self.combine_reports(individual_reports)
+                elif "rate_limit_exceeded" in error_message:
+                    if attempt < max_retries - 1:
+                        wait_time = 60 if "minute" in error_message else backoff_factor ** attempt
+                        logger.warning(f"Rate limit exceeded. Waiting {wait_time}s before retrying...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        return f"ERROR: Rate limit exceeded. Please try again later."
+                elif attempt < max_retries - 1:
+                    wait_time = backoff_factor ** attempt
+                    logger.warning(f"Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"All retry attempts failed")
+                    return f"ERROR: Failed to process documents: {error_message}"
+    
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
-        Process each document individually and then combine the reports
+        Process documents and generate a consolidated report
         
         Args:
             document_texts: List of document text contents
@@ -426,47 +598,9 @@ class LLMService:
             logger.warning("No document texts provided for analysis")
             return "Error: No documents provided for analysis."
             
-        logger.info(f"Processing {len(document_texts)} documents individually")
-        
         try:
-            # Process each document individually
-            individual_reports = []
-            processing_errors = []
-            
-            for i, doc_text in enumerate(document_texts):
-                try:
-                    logger.info(f"Processing document {i+1}/{len(document_texts)}")
-                    report = await self.process_single_document(doc_text, i+1)
-                    
-                    # Check if report indicates an error
-                    if report.startswith("ERROR:"):
-                        processing_errors.append(f"Document {i+1}: {report}")
-                        logger.warning(f"Error processing document {i+1}: {report}")
-                    else:
-                        individual_reports.append(report)
-                        logger.info(f"Document {i+1}/{len(document_texts)} processed successfully")
-                        
-                except Exception as e:
-                    error_msg = f"Error processing document {i+1}: {str(e)}"
-                    processing_errors.append(error_msg)
-                    logger.error(error_msg)
-            
-            # If we didn't process any documents successfully, return error
-            if not individual_reports:
-                error_summary = "\n".join(processing_errors)
-                return f"Failed to process any documents successfully:\n{error_summary}"
-            
-            # Combine all reports into one
-            logger.info(f"Combining {len(individual_reports)} individual reports")
-            combined_report = await self.combine_reports(individual_reports)
-            
-            # If there were any errors not already included, append them to the report
-            if processing_errors and not combined_report.endswith(processing_errors[-1]):
-                error_summary = "\n".join(processing_errors)
-                combined_report += f"\n\n## PROCESSING ERRORS\nThe following errors occurred during processing:\n{error_summary}"
-            
-            logger.info("Report generation completed successfully")
-            return combined_report
+            # Process all documents in a single request when possible
+            return await self.process_all_documents(document_texts)
             
         except Exception as e:
             logger.error(f"Error during document analysis: {str(e)}")
