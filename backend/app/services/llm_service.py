@@ -3,7 +3,6 @@ from typing import Dict, Any, List, Optional
 import groq
 import time
 import logging
-from collections import deque
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -14,7 +13,7 @@ class LLMService:
     def __init__(self):
         self.client = groq.Client(api_key=settings.GROQ_API_KEY)
         self.model = settings.LLM_MODEL
-        self.token_limit_per_request = 29000  # Keep per-request token limit for batching
+        self.token_limit_per_request = 29000
         
         logger.info(f"LLMService initialized with model {self.model}")
     
@@ -25,187 +24,9 @@ class LLMService:
         """
         return len(text) // 4
     
-    def _split_documents_into_batches(self, document_texts: List[str]) -> List[List[str]]:
-        """
-        Split documents into batches to ensure each batch stays under the token limit
-        
-        Args:
-            document_texts: List of document text contents
-            
-        Returns:
-            List of document batches, where each batch is a list of document texts
-        """
-        batches = []
-        current_batch = []
-        current_batch_tokens = 0
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
-        
-        # Reserve tokens for system message and prompt template (approximately)
-        prompt_template_tokens = self._estimate_tokens("""
-            You are a specialized legal assistant with expertise in property law and title searches. 
-            Analyze the following property documents to generate a comprehensive title report.
-
-            ## Instructions:
-            1. Extract all relevant property details (IDs, measurements, locations)
-            2. Identify all parties in the chain of title chronologically
-            3. Note all transfers, deeds, and official registrations with dates
-            4. Document any encumbrances, restrictions or claims
-            5. Flag any potential title issues or missing information
-            6. Format the report according to the standardized template below
-
-            ## Document Content:
-            {combined_text}
-
-            ## Title Report Format:
-            [rest of template]
-        """)
-        
-        # Reserve tokens for the system message and prompt template
-        reserved_tokens = self._estimate_tokens(system_message) + prompt_template_tokens
-        # Set a max token count for documents in a single batch
-        max_batch_tokens = self.token_limit_per_request - reserved_tokens - 500  # 500 token buffer
-        
-        for doc in document_texts:
-            doc_tokens = self._estimate_tokens(doc)
-            
-            # If a single document is too big to fit in one batch, we need to split it
-            if doc_tokens > max_batch_tokens:
-                logger.warning(f"Document too large ({doc_tokens} est. tokens). Consider preprocessing to split large documents.")
-                # If there are documents in the current batch, add them as a batch first
-                if current_batch:
-                    batches.append(current_batch)
-                    current_batch = []
-                    current_batch_tokens = 0
-                
-                # Add this large document as its own batch
-                # In a more advanced implementation, you might split the document itself
-                batches.append([doc])
-                continue
-                
-            # If adding this document would exceed the batch token limit
-            if current_batch_tokens + doc_tokens > max_batch_tokens and current_batch:
-                batches.append(current_batch)
-                current_batch = [doc]
-                current_batch_tokens = doc_tokens
-            else:
-                current_batch.append(doc)
-                current_batch_tokens += doc_tokens
-        
-        # Add the last batch if not empty
-        if current_batch:
-            batches.append(current_batch)
-            
-        logger.info(f"Split {len(document_texts)} documents into {len(batches)} batches")
-        return batches
-    
-    async def _process_batch(self, batch: List[str]) -> str:
-        """
-        Process a single batch of documents
-        
-        Args:
-            batch: List of document text contents for this batch
-            
-        Returns:
-            Analysis result for this batch
-        """
-        combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
-        
-        prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches. 
-        Analyze the following property documents to generate a comprehensive title report.
-
-        ## Instructions:
-        1. Extract all relevant property details (IDs, measurements, locations)
-        2. Identify all parties in the chain of title chronologically
-        3. Note all transfers, deeds, and official registrations with dates
-        4. Document any encumbrances, restrictions or claims
-        5. Flag any potential title issues or missing information
-        6. Format the report according to the standardized template below
-
-        ## Document Content:
-        {combined_text}
-
-        ## Title Report Format:
-
-        # REPORT ON TITLE
-        Date: [Current Date]
-
-        Re.: [Include detailed property description with Survey/Block numbers, measurements, location details, and current owner information]
-
-        That we have caused necessary searches to be taken with the available Revenue records and Sub-Registry Records for a period of last more than Thirty Years and on perusal and verification of documents of title deeds produced to us, we give our report on title in respect of said land as under:
-
-        1. [Original ownership details]
-
-        2. [Chronological chain of title with numbered points]
-           - Include all transfers with dates
-           - Registration details (serial numbers, dates)
-           - Mutation entry details
-           - Inheritance information where applicable
-           - Conversion details (if applicable)
-           - Town Planning Scheme allocations (if applicable)
-
-        [Continue numbered sequence for complete chain of title]
-
-        [Public notice details if applicable]
-
-        [Declaration details if applicable]
-
-        THE SCHEDULE ABOVE REFERRED TO
-
-        ALL THAT piece and parcel of [land classification] bearing [survey/plot numbers] admeasuring [measurements] of [location details] and the same is bounded as follows:
-
-        On or towards the East  : [boundary]
-        On or towards the West  : [boundary]
-        On or towards the North : [boundary]
-        On or towards the South : [boundary]
-
-        [Note any limitations or special considerations]
-
-        [Signature Block]
-        """
-        
-        # Estimate tokens for this request (prompt + system message)
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
-        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-        
-        logger.debug(f"Estimated token usage for batch request: {estimated_tokens}")
-        
-        if estimated_tokens > self.token_limit_per_request:
-            logger.warning(f"Batch exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}). Consider reducing batch size.")
-        
-        # Call Groq API with retry mechanism
-        max_retries = 3
-        backoff_factor = 2
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Sending batch request to Groq API (attempt {attempt + 1}/{max_retries})")
-                
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=8000,
-                    temperature=0.2
-                )
-                
-                logger.info(f"Batch analysis completed")
-                return response.choices[0].message.content
-                
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = backoff_factor ** attempt
-                    logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    raise
-    
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
-        Send documents to LLM for title report generation with batching
+        Send documents to LLM for title report generation without batching
         
         Args:
             document_texts: List of document text contents
@@ -217,104 +38,120 @@ class LLMService:
             logger.warning("No document texts provided for analysis")
             return "Error: No documents provided for analysis."
             
-        logger.info(f"Analyzing {len(document_texts)} documents with LLM using batching")
+        logger.info(f"Analyzing {len(document_texts)} documents with LLM without batching")
         
         try:
-            # Split documents into batches
-            batches = self._split_documents_into_batches(document_texts)
+            # Combine all documents with a separator
+            combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(document_texts)
             
-            if len(batches) == 1:
-                # If there's only one batch, process it directly
-                return await self._process_batch(batches[0])
-            else:
-                # For multiple batches, process each and combine results
-                batch_results = []
-                
-                for i, batch in enumerate(batches):
-                    logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} documents")
-                    result = await self._process_batch(batch)
-                    batch_results.append(result)
-                
-                # Now we need to combine the results
-                # For a title report, we might need a separate processing step
-                combined_report = await self._combine_batch_reports(batch_results)
-                return combined_report
-                
+            prompt = f"""
+            Analyze the following property documents to generate a comprehensive title search report.
+
+            ## Document Content:
+            {combined_text}
+
+            ## Instructions:
+            Generate a comprehensive title search report by extracting the following information:
+
+            1. **Basic Property Identification**
+               - Survey/Block Number and UPIN
+               - Village, Taluka and District location
+               - Any Town Planning/Final Plot numbers
+               - Boundaries or neighboring properties (if available)
+
+            2. **Area and Assessment**
+               - Total area in relevant measurement units
+               - Assessment amount
+               - Breakdown of area by usage (if applicable)
+               - Land use classification
+
+            3. **Current Ownership**
+               - Current owner's full name/entity
+               - How ownership was established (sale deed, inheritance, etc.)
+               - Date of current ownership
+               - Transaction details if recent
+
+            4. **Ownership History**
+               - Chain of title for at least 30 years
+               - All previous owners with dates
+               - Mode of transfer for each change in ownership
+
+            5. **Land Status Changes**
+               - Any conversion from agricultural to non-agricultural
+               - Permissions granted with dates and order numbers
+               - Premiums or fees paid for conversion
+               - Development permissions
+
+            6. **Encumbrances and Litigation**
+               - All court cases related to the property
+               - Status of each case and final orders
+               - Any active disputes or pending litigation
+               - Notices, attachments or stays
+
+            7. **Rights and Restrictions**
+               - Easements or rights of way
+               - Mortgage or loan details
+               - Government restrictions or conditions
+               - Heritage or environmental restrictions
+
+            8. **Revenue and Tax Status**
+               - Current tax assessment
+               - Payment status
+               - Any arrears or dues
+
+            9. **Additional Relevant Information**
+               - Historical use of the property
+               - Administrative changes affecting the property
+               - Special conditions or observations
+
+            10. **Conclusion and Recommendations**
+                - Clear statement on current ownership status
+                - Any red flags or issues requiring attention
+                - Recommendations for further verification
+
+            Format the report with clear headings and sections. Include all relevant details found in the documents.
+            """
+            
+            # Estimate tokens for this request (prompt + system message)
+            system_message = "You are a specialized legal assistant with expertise in property law and title searches."
+            estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
+            
+            logger.debug(f"Estimated token usage for request: {estimated_tokens}")
+            
+            if estimated_tokens > self.token_limit_per_request:
+                logger.warning(f"Request exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}).")
+                return "Error: The combined documents exceed the token limit. Please use fewer or smaller documents."
+            
+            # Call Groq API with retry mechanism
+            max_retries = 3
+            backoff_factor = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Sending request to Groq API (attempt {attempt + 1}/{max_retries})")
+                    
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=29000,
+                        temperature=0.2
+                    )
+                    
+                    logger.info(f"Analysis completed")
+                    return response.choices[0].message.content
+                    
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait_time = backoff_factor ** attempt
+                        logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"All retry attempts failed: {str(e)}")
+                        raise
+                    
         except Exception as e:
             logger.error(f"Error during document analysis: {str(e)}")
             return f"Error analyzing documents: {str(e)}"
-    
-    async def _combine_batch_reports(self, batch_results: List[str]) -> str:
-        """
-        Combine multiple batch results into a single coherent report
-        
-        Args:
-            batch_results: List of analysis results from each batch
-            
-        Returns:
-            Combined report
-        """
-        logger.info(f"Combining {len(batch_results)} batch results into a single report")
-        
-        # If there are many batch results, we might need to batch this combination as well
-        if len(batch_results) == 1:
-            return batch_results[0]
-            
-        combined_text = "\n\n---REPORT SEPARATOR---\n\n".join(batch_results)
-        
-        prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches.
-        
-        You've been given multiple separate title reports that need to be consolidated into a single comprehensive report.
-        These reports may contain overlapping information or refer to different aspects of the same property or related properties.
-        
-        ## Instructions:
-        1. Consolidate all information into a single coherent title report
-        2. Ensure chronological order in the chain of title
-        3. Remove duplicate information
-        4. Harmonize any conflicting information, noting discrepancies if significant
-        5. Maintain the standardized title report format
-        
-        ## Report Fragments:
-        {combined_text}
-        
-        Please produce a single consolidated title report that incorporates all relevant information from these fragments.
-        """
-        
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
-        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-        
-        # If the combined report would be too large, we need a different approach
-        if estimated_tokens > self.token_limit_per_request:
-            logger.warning(f"Combined report would exceed token limit ({estimated_tokens} > {self.token_limit_per_request})")
-            return "The property documents require a more extensive analysis than can be provided in a single report. Please review the separate batch reports or contact support for assistance."
-        
-        # Use the same retry mechanism as in the batch processing
-        max_retries = 3
-        backoff_factor = 2
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Sending consolidation request to Groq API (attempt {attempt + 1}/{max_retries})")
-                
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=8000,
-                    temperature=0.2
-                )
-                
-                logger.info(f"Report consolidation completed")
-                return response.choices[0].message.content
-                
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = backoff_factor ** attempt
-                    logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    raise
