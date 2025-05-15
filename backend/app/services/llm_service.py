@@ -15,13 +15,18 @@ class LLMService:
         self.client = groq.Client(api_key=settings.GROQ_API_KEY)
         self.model = settings.LLM_MODEL
         
-        # Rate limiting settings
-        self.token_limit_per_minute = 6000
-        self.token_limit_per_request = 6000
+        # Rate limiting settings - updated for Groq's actual limits
+        self.requests_per_minute = 10
+        self.token_limit_per_minute = 50000  # Enhanced from 6000 to 50000 tokens
+        self.token_limit_per_request = 8000  # Maximum tokens per request
+        
+        # Track both request and token history for rate limiting
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
+        self.request_history = deque()  # Stores timestamps of requests
         self.window_size_seconds = 60  # 1 minute window
         
-        logger.info(f"LLMService initialized with model {self.model}, token limit {self.token_limit_per_minute}/minute, and {self.token_limit_per_request}/request")
+        logger.info(f"LLMService initialized with model {self.model}, limits: {self.requests_per_minute} requests/minute, "
+                   f"{self.token_limit_per_minute} tokens/minute, and {self.token_limit_per_request} tokens/request")
     
     def _estimate_tokens(self, text: str) -> int:
         """
@@ -30,19 +35,27 @@ class LLMService:
         """
         return len(text) // 4
     
-    def _update_token_history(self, tokens_used: int) -> None:
+    def _update_rate_history(self, tokens_used: int) -> None:
         """
-        Add tokens to history and remove entries older than window size
+        Update both token and request history
         """
         current_time = time.time()
-        self.token_history.append((current_time, tokens_used))
         
-        # Remove entries older than our window
+        # Update token history
+        self.token_history.append((current_time, tokens_used))
         while self.token_history and self.token_history[0][0] < current_time - self.window_size_seconds:
             self.token_history.popleft()
         
-        current_usage = self._get_current_token_usage()
-        logger.debug(f"Token usage updated: {current_usage}/{self.token_limit_per_minute} in current window")
+        # Update request history
+        self.request_history.append(current_time)
+        while self.request_history and self.request_history[0] < current_time - self.window_size_seconds:
+            self.request_history.popleft()
+        
+        current_token_usage = self._get_current_token_usage()
+        current_request_usage = len(self.request_history)
+        
+        logger.debug(f"Rate limits: {current_request_usage}/{self.requests_per_minute} requests, "
+                    f"{current_token_usage}/{self.token_limit_per_minute} tokens in current window")
     
     def _get_current_token_usage(self) -> int:
         """
@@ -52,27 +65,50 @@ class LLMService:
     
     def _check_rate_limit(self, estimated_tokens: int) -> float:
         """
-        Check if sending this many tokens would exceed rate limit
+        Check if we would exceed any rate limit (requests or tokens)
         Returns wait time in seconds, or 0 if no wait needed
         """
-        current_usage = self._get_current_token_usage()
+        current_time = time.time()
         
-        if current_usage + estimated_tokens <= self.token_limit_per_minute:
-            return 0
-        
-        # Calculate how long to wait
-        if not self.token_history:
-            return 0
+        # Clean up old entries
+        while self.token_history and self.token_history[0][0] < current_time - self.window_size_seconds:
+            self.token_history.popleft()
             
-        oldest_timestamp = self.token_history[0][0]
-        time_to_wait = (oldest_timestamp + self.window_size_seconds) - time.time()
-        wait_time = max(0, time_to_wait)
+        while self.request_history and self.request_history[0] < current_time - self.window_size_seconds:
+            self.request_history.popleft()
         
-        if wait_time > 0:
-            logger.info(f"Rate limit would be exceeded. Waiting {wait_time:.2f}s before processing. " 
-                      f"Current usage: {current_usage}/{self.token_limit_per_minute}")
+        # Check request limit (usually more restrictive than token limit)
+        current_requests = len(self.request_history)
+        current_tokens = self._get_current_token_usage()
         
-        return wait_time
+        logger.debug(f"Current usage: {current_requests}/{self.requests_per_minute} requests, "
+                   f"{current_tokens}/{self.token_limit_per_minute} tokens")
+        
+        if current_requests >= self.requests_per_minute:
+            # Request limit reached
+            oldest_request = self.request_history[0]
+            time_to_wait = (oldest_request + self.window_size_seconds) - current_time
+            wait_time = max(0, time_to_wait + 0.1)  # Add small buffer
+            
+            if wait_time > 0:
+                logger.info(f"Request rate limit reached. Waiting {wait_time:.2f}s before processing. "
+                          f"Current usage: {current_requests}/{self.requests_per_minute} requests")
+            
+            return wait_time
+            
+        if current_tokens + estimated_tokens > self.token_limit_per_minute:
+            # Token limit reached
+            oldest_token_time = self.token_history[0][0]
+            time_to_wait = (oldest_token_time + self.window_size_seconds) - current_time
+            wait_time = max(0, time_to_wait + 0.1)  # Add small buffer
+            
+            if wait_time > 0:
+                logger.info(f"Token rate limit would be exceeded. Waiting {wait_time:.2f}s before processing. "
+                          f"Current usage: {current_tokens}/{self.token_limit_per_minute} tokens")
+            
+            return wait_time
+            
+        return 0  # No wait needed
     
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
@@ -251,15 +287,11 @@ class LLMService:
                     logger.warning(f"Request exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}).")
                     return f"Error: Document {i+1} processing would exceed the token limit. Please split the document or modify the approach."
                 
-                # Check rate limit
+                # Check rate limit - this now checks both requests/min and tokens/min
                 wait_time = self._check_rate_limit(estimated_tokens)
                 if wait_time > 0:
                     logger.info(f"Rate limit would be exceeded. Waiting {wait_time:.2f}s before processing document {i+1}.")
                     await asyncio.sleep(wait_time)
-                # If at token limit, wait a full minute to clear the window
-                elif self._get_current_token_usage() >= self.token_limit_per_minute * 0.9:  # 90% threshold
-                    logger.info(f"Approaching rate limit. Pausing for 60 seconds before processing document {i+1}.")
-                    await asyncio.sleep(60)
                 
                 # Call Groq API with retry mechanism
                 max_retries = 3
@@ -279,9 +311,9 @@ class LLMService:
                             temperature=0.0  # Zero temperature for maximum factual accuracy
                         )
                         
-                        # Update token usage tracking
+                        # Update token and request usage tracking
                         tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
-                        self._update_token_history(tokens_used)
+                        self._update_rate_history(tokens_used)
                         
                         # Update accumulated report with this response
                         accumulated_report = response.choices[0].message.content
