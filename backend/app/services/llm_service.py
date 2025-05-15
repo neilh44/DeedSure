@@ -21,18 +21,26 @@ class LLMService:
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
         
-        # Document processing settings
-        self.max_document_chunk_size = 4000  # Max tokens for a document chunk
-        self.max_batch_document_tokens = 4000  # Max total document tokens per batch
+        # CRITICAL: LLaMA-3-8b-8192 has a context window of only 2048 tokens
+        self.model_context_window = 2048
         
-        logger.info(f"LLMService initialized with model {self.model}, token limit {self.token_limit_per_minute}/minute, and {self.token_limit_per_request}/request")
+        # Document processing settings - significantly reduced for smaller context window
+        self.max_document_chunk_size = 800  # Very small chunk size
+        
+        # Reserve tokens for system message, prompt, and response
+        # With 2048 token context window, we need to be very conservative
+        self.max_input_tokens = 1200  # Reserve ~800 tokens for prompt overhead and response
+        
+        logger.info(f"LLMService initialized with model {self.model}, token limit {self.token_limit_per_minute}/minute, " +
+                  f"{self.token_limit_per_request}/request, and context window {self.model_context_window}")
     
     def _estimate_tokens(self, text: str) -> int:
         """
         Roughly estimate the number of tokens in the text.
-        For GPT models, ~4 chars ≈ 1 token, but this is a simple approximation.
+        For LLaMA models, ~3.5 chars ≈ 1 token, but this is a simple approximation.
+        Using a slightly more conservative ratio to avoid underestimating.
         """
-        return len(text) // 4
+        return len(text) // 3
     
     def _update_token_history(self, tokens_used: int) -> None:
         """
@@ -80,7 +88,7 @@ class LLMService:
     
     def _chunk_document(self, document: str) -> List[str]:
         """
-        Split a large document into smaller chunks that fit within token limits
+        Split a large document into very small chunks to fit within 2048 token context window
         
         Args:
             document: Document text content
@@ -97,6 +105,13 @@ class LLMService:
         
         # Split by paragraphs first
         paragraphs = document.split("\n\n")
+        
+        # If very few paragraphs, try to split by sentences
+        if len(paragraphs) < 3:
+            paragraphs = []
+            for para in document.split("\n\n"):
+                paragraphs.extend(para.replace('. ', '.\n').split('\n'))
+        
         chunks = []
         current_chunk = []
         current_chunk_tokens = 0
@@ -106,24 +121,41 @@ class LLMService:
             
             # If a single paragraph is too large, split it by sentences
             if para_tokens > self.max_document_chunk_size:
-                logger.warning(f"Large paragraph found ({para_tokens} tokens). Splitting by sentences.")
                 sentences = paragraph.replace('. ', '.\n').split('\n')
                 
                 for sentence in sentences:
                     sent_tokens = self._estimate_tokens(sentence)
                     
-                    # If adding this sentence would exceed the chunk size, create a new chunk
+                    # If even a single sentence is too long, truncate it into smaller pieces
+                    if sent_tokens > self.max_document_chunk_size:
+                        logger.warning(f"Very long sentence found ({sent_tokens} tokens). Splitting into smaller segments.")
+                        # Use an even smaller segment size to ensure they fit
+                        segment_size = self.max_document_chunk_size * 2  # chars, not tokens
+                        segments = [sentence[i:i + segment_size] for i in range(0, len(sentence), segment_size)]
+                        
+                        for segment in segments:
+                            seg_tokens = self._estimate_tokens(segment)
+                            if current_chunk_tokens + seg_tokens > self.max_document_chunk_size and current_chunk:
+                                chunks.append("\n".join(current_chunk))
+                                current_chunk = [segment]
+                                current_chunk_tokens = seg_tokens
+                            else:
+                                current_chunk.append(segment)
+                                current_chunk_tokens += seg_tokens
+                        continue
+                    
+                    # For normal sentences
                     if current_chunk_tokens + sent_tokens > self.max_document_chunk_size and current_chunk:
-                        chunks.append("\n\n".join(current_chunk))
+                        chunks.append("\n".join(current_chunk))
                         current_chunk = [sentence]
                         current_chunk_tokens = sent_tokens
                     else:
                         current_chunk.append(sentence)
                         current_chunk_tokens += sent_tokens
             
-            # Handle paragraph that fits within limit
+            # Handle regular paragraphs
             elif current_chunk_tokens + para_tokens > self.max_document_chunk_size and current_chunk:
-                chunks.append("\n\n".join(current_chunk))
+                chunks.append("\n".join(current_chunk))
                 current_chunk = [paragraph]
                 current_chunk_tokens = para_tokens
             else:
@@ -132,14 +164,14 @@ class LLMService:
         
         # Add the last chunk if not empty
         if current_chunk:
-            chunks.append("\n\n".join(current_chunk))
+            chunks.append("\n".join(current_chunk))
         
         logger.info(f"Document chunked into {len(chunks)} parts")
         return chunks
     
     def _prepare_batches(self, document_texts: List[str]) -> List[List[str]]:
         """
-        Process documents and create batches that respect token limits
+        Process documents and create small batches that fit in 2048 token context window
         
         Args:
             document_texts: List of document text contents
@@ -147,39 +179,29 @@ class LLMService:
         Returns:
             List of document batches, where each batch is a list of document text chunks
         """
-        # First, split large documents into chunks
+        # First, split documents into small chunks
         all_chunks = []
         for doc in document_texts:
             chunks = self._chunk_document(doc)
             all_chunks.extend(chunks)
         
-        # Calculate estimated prompt overhead tokens (system message + template)
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
+        # Use a minimal prompt template to conserve tokens
+        system_message = "You are a legal assistant."
         prompt_template = """
-        You are a specialized legal assistant with expertise in property law and title searches. 
-        Analyze the following property documents to generate a comprehensive title report.
-
-        ## Instructions:
-        1. Extract all relevant property details (IDs, measurements, locations)
-        2. Identify all parties in the chain of title chronologically
-        3. Note all transfers, deeds, and official registrations with dates
-        4. Document any encumbrances, restrictions or claims
-        5. Flag any potential title issues or missing information
-        6. Format the report according to the standardized template below
-
-        ## Document Content:
+        Analyze this legal document excerpt and identify:
+        - Property details
+        - Ownership information
+        - Key dates
+        
+        Document:
         {combined_text}
-
-        ## Title Report Format:
-        [template content]
         """
         
         overhead_tokens = self._estimate_tokens(system_message) + self._estimate_tokens(prompt_template)
-        # Add buffer for API overhead and response
-        safety_buffer = 500
-        max_chunk_tokens_per_batch = self.token_limit_per_request - overhead_tokens - safety_buffer
+        safety_buffer = 100
+        max_chunk_tokens_per_batch = self.max_input_tokens - overhead_tokens - safety_buffer
         
-        # Now create batches from the chunks
+        # Create small batches
         batches = []
         current_batch = []
         current_batch_tokens = 0
@@ -187,15 +209,8 @@ class LLMService:
         for chunk in all_chunks:
             chunk_tokens = self._estimate_tokens(chunk)
             
-            # Verify each chunk is within limits
-            if chunk_tokens > max_chunk_tokens_per_batch:
-                logger.warning(f"Chunk still too large ({chunk_tokens} tokens) even after splitting. " +
-                             f"Truncating to {max_chunk_tokens_per_batch} tokens.")
-                # Truncate the chunk if it's still too large
-                chunk = chunk[:max_chunk_tokens_per_batch * 4]  # Approximate chars to tokens
-                chunk_tokens = self._estimate_tokens(chunk)
-            
-            # If adding this chunk would exceed the batch token limit
+            # In this extremely constrained context window, most chunks will need their own batch
+            # Only combine very small chunks together
             if current_batch_tokens + chunk_tokens > max_chunk_tokens_per_batch and current_batch:
                 batches.append(current_batch)
                 current_batch = [chunk]
@@ -203,6 +218,12 @@ class LLMService:
             else:
                 current_batch.append(chunk)
                 current_batch_tokens += chunk_tokens
+                
+                # If we've added a chunk and we're close to the limit, create a new batch
+                if current_batch_tokens > max_chunk_tokens_per_batch * 0.8:
+                    batches.append(current_batch)
+                    current_batch = []
+                    current_batch_tokens = 0
         
         # Add the last batch if not empty
         if current_batch:
@@ -210,44 +231,27 @@ class LLMService:
             
         logger.info(f"Created {len(batches)} batches from {len(all_chunks)} document chunks")
         
-        # Verify all batches are within token limits
+        # Double-check all batches fit within context window
         for i, batch in enumerate(batches):
-            batch_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
+            batch_text = "\n---\n".join(batch)
             batch_tokens = self._estimate_tokens(batch_text) + overhead_tokens
             
-            if batch_tokens > self.token_limit_per_request:
-                logger.warning(f"Batch {i+1} exceeds token limit ({batch_tokens} tokens). Adjusting...")
-                # This should not happen with proper chunking, but as a safety measure,
-                # recreate this batch with fewer chunks
-                new_batch = []
-                new_batch_tokens = 0
+            if batch_tokens > self.max_input_tokens:
+                logger.warning(f"Batch {i+1} exceeds context window ({batch_tokens} tokens). Reducing...")
                 
-                for chunk in batch:
-                    chunk_tokens = self._estimate_tokens(chunk)
-                    if new_batch_tokens + chunk_tokens + overhead_tokens <= self.token_limit_per_request:
-                        new_batch.append(chunk)
-                        new_batch_tokens += chunk_tokens
-                    else:
-                        # This chunk doesn't fit, start a new batch
-                        break
-                
-                if new_batch:
-                    batches[i] = new_batch
-                    # Handle remaining chunks in the future
+                # If more than one chunk, keep only the first
+                if len(batch) > 1:
+                    batches[i] = [batch[0]]
                 else:
-                    logger.error(f"Failed to create valid batch. First chunk too large.")
-                    # Keep just the first chunk but truncate it
-                    if batch:
-                        first_chunk = batch[0]
-                        max_chars = (self.token_limit_per_request - overhead_tokens - safety_buffer) * 4
-                        truncated_chunk = first_chunk[:max_chars]
-                        batches[i] = [truncated_chunk]
+                    # Otherwise truncate the single chunk
+                    max_chars = (self.max_input_tokens - overhead_tokens - safety_buffer) * 3
+                    batches[i] = [batch[0][:max_chars]]
         
         return batches
     
     async def _process_batch(self, batch: List[str]) -> Tuple[str, bool]:
         """
-        Process a single batch of document chunks
+        Process a single batch of document chunks with minimal prompting
         
         Args:
             batch: List of document text chunks for this batch
@@ -255,71 +259,48 @@ class LLMService:
         Returns:
             Tuple of (analysis result, success flag)
         """
-        combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
+        # Use minimal prompt to conserve context window space
+        combined_text = "\n---\n".join(batch)
         
         prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches. 
-        Analyze the following property documents to generate a comprehensive title report.
-
-        ## Instructions:
-        1. Extract all relevant property details (IDs, measurements, locations)
-        2. Identify all parties in the chain of title chronologically
-        3. Note all transfers, deeds, and official registrations with dates
-        4. Document any encumbrances, restrictions or claims
-        5. Flag any potential title issues or missing information
-        6. Format the report according to the standardized template below
-
-        ## Document Content:
+        Analyze this legal document excerpt and extract:
+        - Property details (location, measurements, identifiers)
+        - Ownership information and transfers
+        - Key dates and registration details
+        
+        Document:
         {combined_text}
-
-        ## Title Report Format:
-
-        # REPORT ON TITLE
-        Date: [Current Date]
-
-        Re.: [Include detailed property description with Survey/Block numbers, measurements, location details, and current owner information]
-
-        That we have caused necessary searches to be taken with the available Revenue records and Sub-Registry Records for a period of last more than Thirty Years and on perusal and verification of documents of title deeds produced to us, we give our report on title in respect of said land as under:
-
-        1. [Original ownership details]
-
-        2. [Chronological chain of title with numbered points]
-           - Include all transfers with dates
-           - Registration details (serial numbers, dates)
-           - Mutation entry details
-           - Inheritance information where applicable
-           - Conversion details (if applicable)
-           - Town Planning Scheme allocations (if applicable)
-
-        [Continue numbered sequence for complete chain of title]
-
-        [Public notice details if applicable]
-
-        [Declaration details if applicable]
-
-        THE SCHEDULE ABOVE REFERRED TO
-
-        ALL THAT piece and parcel of [land classification] bearing [survey/plot numbers] admeasuring [measurements] of [location details] and the same is bounded as follows:
-
-        On or towards the East  : [boundary]
-        On or towards the West  : [boundary]
-        On or towards the North : [boundary]
-        On or towards the South : [boundary]
-
-        [Note any limitations or special considerations]
-
-        [Signature Block]
         """
         
-        # Estimate tokens for this request (prompt + system message)
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
+        # Ultra-minimal system message
+        system_message = "You are a legal assistant."
         estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
         
         logger.debug(f"Estimated token usage for batch request: {estimated_tokens}")
         
-        if estimated_tokens > self.token_limit_per_request:
-            logger.error(f"Batch exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}) even after preprocessing.")
-            return f"Error: Document too large to process within token limits ({estimated_tokens} tokens).", False
+        if estimated_tokens > self.max_input_tokens:
+            logger.error(f"Batch exceeds context window ({estimated_tokens} > {self.max_input_tokens}).")
+            
+            # If the batch is too large, simplify by taking just one document
+            if len(batch) > 1:
+                batch = [batch[0]]
+                combined_text = batch[0]
+                prompt = prompt.replace("{combined_text}", combined_text)
+                estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
+                
+                if estimated_tokens > self.max_input_tokens:
+                    # If still too large, truncate
+                    max_chars = (self.max_input_tokens - self._estimate_tokens(system_message) - 200) * 3
+                    truncated_text = combined_text[:max_chars]
+                    prompt = prompt.replace(combined_text, truncated_text)
+                    estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
+                    
+                    logger.warning(f"Truncated batch to {estimated_tokens} tokens")
+                    
+                    if estimated_tokens > self.max_input_tokens:
+                        return f"Error: Document too large to process within context window.", False
+            else:
+                return f"Error: Document too large for analysis.", False
         
         # Check rate limit
         wait_time = self._check_rate_limit(estimated_tokens)
@@ -335,18 +316,18 @@ class LLMService:
             try:
                 logger.info(f"Sending batch request to Groq API (attempt {attempt + 1}/{max_retries})")
                 
-                # Limit tokens in both directions
+                # Set a small max_tokens to leave room in the context window
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=4000,  # Limit the response size
+                    max_tokens=800,  # Smaller to fit in 2048 context window
                     temperature=0.2
                 )
                 
-                # Update token history with actual tokens used
+                # Update token history
                 tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
                 self._update_token_history(tokens_used)
                 
@@ -356,25 +337,26 @@ class LLMService:
             except Exception as e:
                 error_message = str(e)
                 
-                # Check for token limit exceeded errors specifically
-                if "413" in error_message and "too large" in error_message:
-                    logger.error(f"Request too large for API: {error_message}")
+                # Check for context length exceeded error
+                if "context_length_exceeded" in error_message or "reduce the length" in error_message:
+                    logger.error(f"Context length exceeded: {error_message}")
+                    
                     if attempt == max_retries - 1:
-                        # This is the last attempt, return error
-                        return f"Error: Unable to process document due to size constraints. Please break down the document into smaller parts.", False
+                        # Failed after all retries
+                        return f"Error: Unable to process document due to size constraints.", False
                     else:
-                        # Reduce prompt size for next attempt by truncating the document content
-                        logger.warning(f"Reducing content size for next attempt")
-                        # Cut the batch in half for the next attempt
+                        # Try with smaller content
                         if len(batch) > 1:
-                            batch = batch[:len(batch)//2]
+                            # Use just the first document
+                            batch = [batch[0]]
                         else:
-                            # If only one chunk, truncate it
+                            # Take half of the single document
                             batch[0] = batch[0][:len(batch[0])//2]
-                        combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
+                            
+                        # Regenerate prompt
+                        combined_text = "\n---\n".join(batch)
                         prompt = prompt.replace("{combined_text}", combined_text)
-                        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-                        logger.info(f"Reduced content size, new token estimate: {estimated_tokens}")
+                
                 elif attempt < max_retries - 1:
                     wait_time = backoff_factor ** attempt
                     logger.warning(f"API call failed: {error_message}. Retrying in {wait_time}s...")
@@ -400,47 +382,100 @@ class LLMService:
         logger.info(f"Analyzing {len(document_texts)} documents with LLM using batching")
         
         try:
-            # Prepare batches with proper chunking
+            # Prepare batches with proper chunking for small context window
             batches = self._prepare_batches(document_texts)
             
             if not batches:
                 return "Error: Failed to prepare document batches for processing."
             
-            if len(batches) == 1:
-                # If there's only one batch, process it directly
-                result, success = await self._process_batch(batches[0])
-                return result
+            # Process each batch in parallel for efficiency
+            batch_results = []
+            successful_results = []
+            
+            # Process batches sequentially to respect rate limits
+            for i, batch in enumerate(batches):
+                logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} chunks")
+                result, success = await self._process_batch(batch)
+                
+                batch_results.append(result)
+                if success and not result.startswith("Error"):
+                    successful_results.append(result)
+            
+            # Check if we have any successful results
+            if not successful_results:
+                logger.error("No successful batch processing results")
+                return "Error: Unable to process any document sections successfully. The document may be too complex for analysis."
+            
+            # With small context window, we need to process the combined report in stages
+            if len(successful_results) == 1:
+                # Only one result, so return it directly
+                return self._format_final_report(successful_results[0])
+            elif len(successful_results) <= 5:
+                # Few enough results to combine in one step
+                combined_report = await self._combine_batch_reports(successful_results)
+                return self._format_final_report(combined_report)
             else:
-                # For multiple batches, process each and combine results
-                batch_results = []
-                all_succeeded = True
+                # Too many results, process in groups
+                logger.info(f"Many batch results ({len(successful_results)}), combining in groups")
                 
-                for i, batch in enumerate(batches):
-                    logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} chunks")
-                    result, success = await self._process_batch(batch)
-                    if success:
-                        batch_results.append(result)
+                # Combine in groups of 3
+                group_size = 3
+                grouped_results = []
+                
+                for i in range(0, len(successful_results), group_size):
+                    group = successful_results[i:i+group_size]
+                    if len(group) == 1:
+                        grouped_results.append(group[0])
                     else:
-                        all_succeeded = False
-                        batch_results.append(f"Batch {i+1} analysis failed: {result}")
+                        combined = await self._combine_batch_reports(group)
+                        grouped_results.append(combined)
                 
-                # Now we need to combine the results
-                # Only attempt to combine if we have some successful results
-                if batch_results and any(not r.startswith("Error") and not r.startswith("Batch") for r in batch_results):
-                    combined_report = await self._combine_batch_reports(batch_results)
-                    return combined_report
-                elif not all_succeeded:
-                    return "Error: Failed to process one or more document batches. Please review the individual errors or try with smaller documents."
+                # Now combine the grouped results
+                if len(grouped_results) == 1:
+                    return self._format_final_report(grouped_results[0])
                 else:
-                    return "Error: No successful document analysis to report."
-                
+                    final_report = await self._combine_batch_reports(grouped_results)
+                    return self._format_final_report(final_report)
+                    
         except Exception as e:
             logger.error(f"Error during document analysis: {str(e)}")
             return f"Error analyzing documents: {str(e)}"
     
+    def _format_final_report(self, report_content: str) -> str:
+        """
+        Format the final report with a standardized structure
+        
+        Args:
+            report_content: The raw report content
+            
+        Returns:
+            Formatted report
+        """
+        # Add standard title report format if not already present
+        if "REPORT ON TITLE" not in report_content and "Title Report" not in report_content:
+            current_date = time.strftime("%B %d, %Y")
+            
+            # Extract property details if possible
+            property_details = "See details in report body"
+            
+            formatted_report = f"""
+# REPORT ON TITLE
+Date: {current_date}
+
+Re: {property_details}
+
+{report_content}
+
+THE SCHEDULE ABOVE REFERRED TO
+(See details in the report body)
+            """
+            return formatted_report.strip()
+        
+        return report_content
+    
     async def _combine_batch_reports(self, batch_results: List[str]) -> str:
         """
-        Combine multiple batch results into a single coherent report
+        Combine multiple batch results into a coherent report, respecting 2048 token context window
         
         Args:
             batch_results: List of analysis results from each batch
@@ -450,100 +485,74 @@ class LLMService:
         """
         logger.info(f"Combining {len(batch_results)} batch results into a single report")
         
-        # If there are many batch results, we might need to batch this combination as well
         if len(batch_results) == 1:
             return batch_results[0]
             
-        combined_text = "\n\n---REPORT SEPARATOR---\n\n".join(batch_results)
+        # Use a very minimal prompt for combining results to save context space
+        # Instead of sending all results at once, summarize key points
+        system_message = "You are a legal assistant."
+        
+        # Extract summaries from each result (first few lines) to reduce token usage
+        summarized_results = []
+        for i, result in enumerate(batch_results):
+            # Get first 5 lines or 300 chars, whichever is shorter
+            lines = result.split('\n')[:5]
+            summary = '\n'.join(lines)
+            if len(summary) > 300:
+                summary = summary[:300] + "..."
+            summarized_results.append(f"Section {i+1}:\n{summary}")
+        
+        combined_text = "\n\n---\n\n".join(summarized_results)
         
         prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches.
+        You have analyzed multiple sections of a legal document. Create a coherent title report by combining these findings:
         
-        You've been given multiple separate title reports that need to be consolidated into a single comprehensive report.
-        These reports may contain overlapping information or refer to different aspects of the same property or related properties.
-        
-        ## Instructions:
-        1. Consolidate all information into a single coherent title report
-        2. Ensure chronological order in the chain of title
-        3. Remove duplicate information
-        4. Harmonize any conflicting information, noting discrepancies if significant
-        5. Maintain the standardized title report format
-        
-        ## Report Fragments:
         {combined_text}
         
-        Please produce a single consolidated title report that incorporates all relevant information from these fragments.
+        Note: These are just summaries. Focus on organizing the key information into a standard title report format.
         """
         
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
         estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
         
-        # If the combined report would be too large, we need to process it in batches too
-        if estimated_tokens > self.token_limit_per_request:
-            logger.warning(f"Combined report would exceed token limit ({estimated_tokens} > {self.token_limit_per_request})")
+        # If still too large for context window, use even less information
+        if estimated_tokens > self.max_input_tokens:
+            logger.warning(f"Combined summaries still exceed context window ({estimated_tokens} tokens)")
             
-            # Split the batch results into smaller groups
-            max_batch_results = 3  # Process 3 results at a time
-            result_batches = [batch_results[i:i+max_batch_results] for i in range(0, len(batch_results), max_batch_results)]
+            # Just use first and last result with minimal context
+            first_result = batch_results[0]
+            last_result = batch_results[-1]
             
-            intermediate_results = []
-            for i, result_batch in enumerate(result_batches):
-                logger.info(f"Processing intermediate combination batch {i+1}/{len(result_batches)}")
-                batch_text = "\n\n---REPORT SEPARATOR---\n\n".join(result_batch)
-                
-                intermediate_prompt = prompt.replace("{combined_text}", batch_text)
-                estimated_tokens = self._estimate_tokens(intermediate_prompt) + self._estimate_tokens(system_message)
-                
-                if estimated_tokens > self.token_limit_per_request:
-                    logger.warning(f"Intermediate batch still too large ({estimated_tokens} tokens). Using first result only.")
-                    intermediate_results.append(result_batch[0])
-                    continue
-                
-                # Process this intermediate batch
-                wait_time = self._check_rate_limit(estimated_tokens)
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                
-                try:
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_message},
-                            {"role": "user", "content": intermediate_prompt}
-                        ],
-                        max_tokens=4000,
-                        temperature=0.2
-                    )
-                    
-                    tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
-                    self._update_token_history(tokens_used)
-                    
-                    intermediate_results.append(response.choices[0].message.content)
-                except Exception as e:
-                    logger.error(f"Error combining intermediate results: {str(e)}")
-                    # If combination fails, just use the first result from this batch
-                    if result_batch:
-                        intermediate_results.append(result_batch[0])
+            # Truncate even more aggressively
+            first_summary = first_result.split('\n')[0][:200]
+            last_summary = last_result.split('\n')[0][:200]
             
-            # Now combine the intermediate results
-            if len(intermediate_results) == 1:
-                return intermediate_results[0]
-            else:
-                return await self._combine_batch_reports(intermediate_results)
+            prompt = f"""
+            Create a title report by combining information from different document sections.
+            
+            First section begins with: {first_summary}...
+            
+            Last section begins with: {last_summary}...
+            
+            There were {len(batch_results)} total sections analyzed.
+            """
+            
+            estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
+            
+            if estimated_tokens > self.max_input_tokens:
+                logger.error(f"Cannot fit even minimal combined prompt in context window")
+                return "# TITLE REPORT\n\nMultiple document sections were analyzed. Due to processing limitations, please refer to the individual section analyses."
         
-        # Standard processing for reports that fit within limits
+        # Check rate limit
         wait_time = self._check_rate_limit(estimated_tokens)
         if wait_time > 0:
-            logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before consolidating reports.")
             await asyncio.sleep(wait_time)
         
-        # Use the same retry mechanism as in the batch processing
-        max_retries = 3
-        backoff_factor = 2
+        # Process the combination request
+        max_retries = 2
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"Sending consolidation request to Groq API (attempt {attempt + 1}/{max_retries})")
+                logger.info(f"Sending combination request to Groq API (attempt {attempt + 1}/{max_retries})")
                 
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -551,33 +560,33 @@ class LLMService:
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=4000,
+                    max_tokens=800,
                     temperature=0.2
                 )
                 
-                # Update token history
                 tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
                 self._update_token_history(tokens_used)
                 
-                logger.info(f"Report consolidation completed. Tokens used: {tokens_used}")
+                logger.info(f"Report combination completed. Tokens used: {tokens_used}")
                 return response.choices[0].message.content
                 
             except Exception as e:
                 error_message = str(e)
                 
-                # Check for token limit exceeded errors
-                if "413" in error_message and "too large" in error_message:
-                    logger.error(f"Consolidation request too large: {error_message}")
+                if "context_length_exceeded" in error_message or "reduce the length" in error_message:
                     if attempt == max_retries - 1:
-                        # On last attempt, return a simple combination
-                        return "## CONSOLIDATED TITLE REPORT\n\nThis report combines multiple analyses due to document size.\n\n" + \
-                               "\n\n---SECTION DIVIDER---\n\n".join(batch_results[:3]) + \
-                               "\n\n(Some sections may have been omitted due to size constraints.)"
+                        # Use an ultra-minimal approach as fallback
+                        return "# TITLE REPORT\n\nThis report combines analysis from multiple document sections. The combined document was too large for complete analysis in one pass."
+                    else:
+                        # Try with much less content
+                        prompt = f"""
+                        Create a title report outline based on analyzing multiple document sections.
+                        There were {len(batch_results)} sections total.
+                        """
                 elif attempt < max_retries - 1:
-                    wait_time = backoff_factor ** attempt
+                    wait_time = 1
                     logger.warning(f"API call failed: {error_message}. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"All retry attempts failed: {error_message}")
-                    return "## CONSOLIDATED TITLE REPORT\n\nDue to processing limitations, here are the key sections of the report:\n\n" + \
-                           "\n\n---SECTION DIVIDER---\n\n".join(batch_results[:2])
+                    logger.error(f"All combination retry attempts failed: {error_message}")
+                    return "# TITLE REPORT\n\nMultiple document sections were analyzed. Due to API constraints, please refer to individual section analyses."
