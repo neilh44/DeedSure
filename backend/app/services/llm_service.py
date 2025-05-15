@@ -136,7 +136,7 @@ class LLMService:
                             {"role": "system", "content": system_message},
                             {"role": "user", "content": prompt}
                         ],
-                        max_tokens=29000,
+                        max_tokens=8000,
                         temperature=0.2
                     )
                     
