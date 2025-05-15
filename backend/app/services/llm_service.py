@@ -71,10 +71,23 @@ class LLMService:
                - Date of current ownership
                - Transaction details if recent
 
-            4. **Ownership History**
-               - Chain of title for at least 30 years
-               - All previous owners with dates
-               - Mode of transfer for each change in ownership
+            4. **Ownership History and Chain of Title** (CRITICAL SECTION - PROVIDE DETAILED CHRONOLOGICAL HISTORY)
+               - Create a comprehensive chronological chain of title showing ALL ownership changes
+               - For EACH transfer/transaction, include:
+                  * Exact date of transaction
+                  * Entry/note number and its date in the record
+                  * Names of all parties (transferor and transferee)
+                  * Type of transaction (sale, inheritance, court order, etc.)
+                  * Sale consideration amount (if applicable)
+                  * Registration details of deeds/documents
+                  * Survey numbers or plot numbers involved
+                  * Any special conditions of the transfer
+               - Start with the earliest recorded owner and proceed chronologically to present
+               - Include ALL intermediate owners, even for short periods
+               - Document each step in the transfer history with specific reference to entries in the land record
+               - Note any gaps or unclear periods in the ownership history
+               - Pay special attention to ownership percentages/shares if multiple owners
+               - Include ALL court proceedings affecting ownership
 
             5. **Land Status Changes**
                - Any conversion from agricultural to non-agricultural
@@ -109,11 +122,12 @@ class LLMService:
                 - Any red flags or issues requiring attention
                 - Recommendations for further verification
 
-            Format the report with clear headings and sections. Include all relevant details found in the documents.
+            Format the report with clear headings and sections. Include all relevant details found in the documents. 
+            THE CHAIN OF TITLE HISTORY MUST BE DETAILED, PRECISE, AND CHRONOLOGICAL - DO NOT SUMMARIZE OR GENERALIZE THIS SECTION.
             """
             
             # Estimate tokens for this request (prompt + system message)
-            system_message = "You are a specialized legal assistant with expertise in property law and title searches."
+            system_message = "You are a specialized legal assistant with expertise in property law and title searches. You extract detailed information from land records and generate comprehensive chronological chain of title histories showing every owner and transaction."
             estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
             
             logger.debug(f"Estimated token usage for request: {estimated_tokens}")
@@ -137,7 +151,7 @@ class LLMService:
                             {"role": "user", "content": prompt}
                         ],
                         max_tokens=8000,
-                        temperature=0.2
+                        temperature=0.1  # Lower temperature for more precise factual extraction
                     )
                     
                     logger.info(f"Analysis completed")
