@@ -16,8 +16,8 @@ class LLMService:
         self.model = settings.LLM_MODEL
         
         # Rate limiting settings
-        self.token_limit_per_minute = 5500
-        self.token_limit_per_request = 6000  # New per-request token limit
+        self.token_limit_per_minute = 6000
+        self.token_limit_per_request = 6000
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
         
@@ -74,198 +74,9 @@ class LLMService:
         
         return wait_time
     
-    def _split_documents_into_batches(self, document_texts: List[str]) -> List[List[str]]:
-        """
-        Split documents into batches to ensure each batch stays under the token limit
-        
-        Args:
-            document_texts: List of document text contents
-            
-        Returns:
-            List of document batches, where each batch is a list of document texts
-        """
-        batches = []
-        current_batch = []
-        current_batch_tokens = 0
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
-        
-        # Reserve tokens for system message and prompt template (approximately)
-        prompt_template_tokens = self._estimate_tokens("""
-            You are a specialized legal assistant with expertise in property law and title searches. 
-            Analyze the following property documents to generate a comprehensive title report.
-
-            ## Instructions:
-            1. Extract all relevant property details (IDs, measurements, locations)
-            2. Identify all parties in the chain of title chronologically
-            3. Note all transfers, deeds, and official registrations with dates
-            4. Document any encumbrances, restrictions or claims
-            5. Flag any potential title issues or missing information
-            6. Format the report according to the standardized template below
-
-            ## Document Content:
-            {combined_text}
-
-            ## Title Report Format:
-            [rest of template]
-        """)
-        
-        # Reserve tokens for the system message and prompt template
-        reserved_tokens = self._estimate_tokens(system_message) + prompt_template_tokens
-        # Set a max token count for documents in a single batch
-        max_batch_tokens = self.token_limit_per_request - reserved_tokens - 500  # 500 token buffer
-        
-        for doc in document_texts:
-            doc_tokens = self._estimate_tokens(doc)
-            
-            # If a single document is too big to fit in one batch, we need to split it
-            if doc_tokens > max_batch_tokens:
-                logger.warning(f"Document too large ({doc_tokens} est. tokens). Consider preprocessing to split large documents.")
-                # If there are documents in the current batch, add them as a batch first
-                if current_batch:
-                    batches.append(current_batch)
-                    current_batch = []
-                    current_batch_tokens = 0
-                
-                # Add this large document as its own batch
-                # In a more advanced implementation, you might split the document itself
-                batches.append([doc])
-                continue
-                
-            # If adding this document would exceed the batch token limit
-            if current_batch_tokens + doc_tokens > max_batch_tokens and current_batch:
-                batches.append(current_batch)
-                current_batch = [doc]
-                current_batch_tokens = doc_tokens
-            else:
-                current_batch.append(doc)
-                current_batch_tokens += doc_tokens
-        
-        # Add the last batch if not empty
-        if current_batch:
-            batches.append(current_batch)
-            
-        logger.info(f"Split {len(document_texts)} documents into {len(batches)} batches")
-        return batches
-    
-    async def _process_batch(self, batch: List[str]) -> str:
-        """
-        Process a single batch of documents
-        
-        Args:
-            batch: List of document text contents for this batch
-            
-        Returns:
-            Analysis result for this batch
-        """
-        combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
-        
-        prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches. 
-        Analyze the following property documents to generate a comprehensive title report.
-
-        ## Instructions:
-        1. Extract all relevant property details (IDs, measurements, locations)
-        2. Identify all parties in the chain of title chronologically
-        3. Note all transfers, deeds, and official registrations with dates
-        4. Document any encumbrances, restrictions or claims
-        5. Flag any potential title issues or missing information
-        6. Format the report according to the standardized template below
-
-        ## Document Content:
-        {combined_text}
-
-        ## Title Report Format:
-
-        # REPORT ON TITLE
-        Date: [Current Date]
-
-        Re.: [Include detailed property description with Survey/Block numbers, measurements, location details, and current owner information]
-
-        That we have caused necessary searches to be taken with the available Revenue records and Sub-Registry Records for a period of last more than Thirty Years and on perusal and verification of documents of title deeds produced to us, we give our report on title in respect of said land as under:
-
-        1. [Original ownership details]
-
-        2. [Chronological chain of title with numbered points]
-           - Include all transfers with dates
-           - Registration details (serial numbers, dates)
-           - Mutation entry details
-           - Inheritance information where applicable
-           - Conversion details (if applicable)
-           - Town Planning Scheme allocations (if applicable)
-
-        [Continue numbered sequence for complete chain of title]
-
-        [Public notice details if applicable]
-
-        [Declaration details if applicable]
-
-        THE SCHEDULE ABOVE REFERRED TO
-
-        ALL THAT piece and parcel of [land classification] bearing [survey/plot numbers] admeasuring [measurements] of [location details] and the same is bounded as follows:
-
-        On or towards the East  : [boundary]
-        On or towards the West  : [boundary]
-        On or towards the North : [boundary]
-        On or towards the South : [boundary]
-
-        [Note any limitations or special considerations]
-
-        [Signature Block]
-        """
-        
-        # Estimate tokens for this request (prompt + system message)
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
-        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-        
-        logger.debug(f"Estimated token usage for batch request: {estimated_tokens}")
-        
-        if estimated_tokens > self.token_limit_per_request:
-            logger.warning(f"Batch exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}). Consider reducing batch size.")
-        
-        # Check rate limit
-        wait_time = self._check_rate_limit(estimated_tokens)
-        if wait_time > 0:
-            # Wait until we can process this request
-            logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before sending request.")
-            await asyncio.sleep(wait_time)  # Using asyncio.sleep for async compatibility
-        
-        # Call Groq API with retry mechanism
-        max_retries = 3
-        backoff_factor = 2
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Sending batch request to Groq API (attempt {attempt + 1}/{max_retries})")
-                
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=8000,
-                    temperature=0.2
-                )
-                
-                # Update token history with actual tokens used
-                tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
-                self._update_token_history(tokens_used)
-                
-                logger.info(f"Batch analysis completed. Tokens used: {tokens_used}")
-                return response.choices[0].message.content
-                
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = backoff_factor ** attempt
-                    logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    raise
-    
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
-        Send documents to LLM for title report generation without batching
+        Process documents sequentially, one at a time
         
         Args:
             document_texts: List of document text contents
@@ -277,251 +88,219 @@ class LLMService:
             logger.warning("No document texts provided for analysis")
             return "Error: No documents provided for analysis."
             
-        logger.info(f"Analyzing {len(document_texts)} documents with LLM without batching")
+        logger.info(f"Sequentially analyzing {len(document_texts)} documents with LLM")
         
-        try:
-            # Combine all documents with a separator
-            combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(document_texts)
-            
-            prompt = f"""
-            Analyze the following property documents to generate an extremely detailed and comprehensive title search report. Pay particular attention to extracting EVERY entry in the chronological chain of title.
-
-            ## Document Content:
-            {combined_text}
-
-            ## Instructions:
-            You must carefully examine all pages of the land record document and extract EVERY detail to produce a comprehensive title search report with the following sections:
-
-            1. **Basic Property Identification**
-               - Survey/Block Number and UPIN
-               - Village, Taluka and District location
-               - Any Town Planning/Final Plot numbers
-               - Boundaries or neighboring properties (if available)
-               - Detailed property description including location indicators
-
-            2. **Area and Assessment**
-               - Total area in relevant measurement units (specify hectares, acres, square meters, etc.)
-               - Assessment amount with currency
-               - Breakdown of area by usage (residential, commercial, etc.)
-               - Land use classification (agricultural, non-agricultural, etc.)
-               - Any other area-related details mentioned in the record
-
-            3. **Current Ownership**
-               - Current owner's full name/entity with EXACT spelling from the record
-               - How ownership was established (specific sale deed number, inheritance, etc.)
-               - Exact date of current ownership acquisition
-               - Transaction details including consideration amount, registration details
-               - Percentage/share of ownership if multiple owners
-
-            4. **EXHAUSTIVE Chronological Chain of Title**
-               - Extract EVERY SINGLE entry from the "Entry Details" section of the record
-               - Format as a detailed table with these columns:
-                  * Entry/Note Number
-                  * Entry Date
-                  * Transaction Type
-                  * Transferor(s) (seller/previous owner)
-                  * Transferee(s) (buyer/new owner)
-                  * Transaction Details
-                  * Consideration Amount (if sale)
-                  * Special Conditions or Notes
-               - Present entries in strict chronological order from earliest to most recent
-               - Include ALL entries visible in the document without omitting ANY details
-               - For each entry, explain its significance to the chain of title
-               - Do not summarize or abbreviate entries - include complete information
-               - Ensure proper tracking of ownership shares/percentages when multiple owners
-               - Cross-reference entry numbers mentioned in different sections of the document
-
-            5. **Land Status Changes**
-               - Detail ALL changes from agricultural to non-agricultural use
-               - Include all permissions with dates, authority granting permission, and order numbers
-               - List all premiums or fees paid for conversion with exact amounts
-               - Document all development permissions with relevant details
-               - Note any conditions attached to conversions or permissions
-
-            6. **Comprehensive Encumbrances and Litigation History**
-               - Extract ALL court cases from the document with their numbers and dates
-               - Document the complete history of each case including:
-                  * Parties involved
-                  * Nature of dispute
-                  * Filing dates
-                  * Court/authority hearing the case
-                  * Case status (pending, disposed, etc.)
-                  * Final orders with dates and implications
-               - Include ALL entries from the "Boja and Other Rights Details" section
-               - Document ALL notices, attachments, or stays affecting the property
-               - Note ALL mortgage details if mentioned
-
-            7. **Rights and Restrictions**
-               - Document ALL easements or rights of way
-               - Extract ALL mortgage or loan details
-               - List ALL government restrictions or conditions
-               - Note ANY other restrictions on property usage
-
-            8. **Revenue and Tax Status**
-               - Current tax assessment with exact amount
-               - Payment status if mentioned
-               - Any arrears or dues
-               - Historical tax assessment changes if available
-
-            9. **Crop and Land Use History**
-               - Extract information from the "Crop Details" section
-               - Document historical crop patterns and land usage
-               - Note irrigation details if mentioned
-
-            10. **Additional Relevant Information**
-                - Document ALL administrative changes affecting the property
-                - Note ALL special conditions or observations
-                - Include ANY other relevant information from the document
-
-            11. **Conclusion and Recommendations**
-                - Provide a clear statement on current ownership status
-                - List ALL potential red flags or issues requiring attention
-                - Offer specific recommendations for further verification
-                - Comment on the completeness of the title based on the document
-
-            FORMAT REQUIREMENTS:
-            - Begin with a clear title and date of report
-            - Use numbered sections with clear headings
-            - Present the chain of title as a detailed chronological table
-            - For entries with extensive details, provide complete information rather than summarizing
-            - Bold key facts, dates, and figures
-            - Ensure ALL information is directly extracted from the document
-            - DO NOT invent or assume details not present in the document
-            - If information appears to be missing or unclear, explicitly note this
-
-            Your report MUST be EXHAUSTIVE - do not omit ANY details from the document. This report will be used for legal purposes, so accuracy and completeness are absolutely critical.
-            """
-            
-            # Estimate tokens for this request (prompt + system message)
-            system_message = "You are an expert legal title examiner with decades of experience in property law, land records, and title searches. You meticulously extract EVERY detail from land records to create exhaustive title reports that document the complete chain of title without omitting any information. Your specialty is creating detailed chronological ownership histories that capture every entry in land records without summarization."
-            estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-            
-            logger.debug(f"Estimated token usage for request: {estimated_tokens}")
-            
-            if estimated_tokens > self.token_limit_per_request:
-                logger.warning(f"Request exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}).")
-                return "Error: The combined documents exceed the token limit. Please use fewer or smaller documents."
-            
-            # Call Groq API with retry mechanism
-            max_retries = 3
-            backoff_factor = 2
-            
-            for attempt in range(max_retries):
-                try:
-                    logger.info(f"Sending request to Groq API (attempt {attempt + 1}/{max_retries})")
-                    
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_message},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=8000,
-                        temperature=0.0  # Zero temperature for maximum factual accuracy
-                    )
-                    
-                    logger.info(f"Analysis completed")
-                    return response.choices[0].message.content
-                    
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        wait_time = backoff_factor ** attempt
-                        logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"All retry attempts failed: {str(e)}")
-                        raise
-                    
-        except Exception as e:
-            logger.error(f"Error during document analysis: {str(e)}")
-            return f"Error analyzing documents: {str(e)}"
+        # Process one document at a time
+        accumulated_report = ""
+        system_message = "You are an expert legal title examiner with decades of experience in property law, land records, and title searches. You meticulously extract EVERY detail from land records to create exhaustive title reports that document the complete chain of title without omitting any information. Your specialty is creating detailed chronological ownership histories that capture every entry in land records without summarization."
         
-    
-    async def _combine_batch_reports(self, batch_results: List[str]) -> str:
-        """
-        Combine multiple batch results into a single coherent report
-        
-        Args:
-            batch_results: List of analysis results from each batch
-            
-        Returns:
-            Combined report
-        """
-        logger.info(f"Combining {len(batch_results)} batch results into a single report")
-        
-        # If there are many batch results, we might need to batch this combination as well
-        if len(batch_results) == 1:
-            return batch_results[0]
-            
-        combined_text = "\n\n---REPORT SEPARATOR---\n\n".join(batch_results)
-        
-        prompt = f"""
-        You are a specialized legal assistant with expertise in property law and title searches.
-        
-        You've been given multiple separate title reports that need to be consolidated into a single comprehensive report.
-        These reports may contain overlapping information or refer to different aspects of the same property or related properties.
-        
-        ## Instructions:
-        1. Consolidate all information into a single coherent title report
-        2. Ensure chronological order in the chain of title
-        3. Remove duplicate information
-        4. Harmonize any conflicting information, noting discrepancies if significant
-        5. Maintain the standardized title report format
-        
-        ## Report Fragments:
-        {combined_text}
-        
-        Please produce a single consolidated title report that incorporates all relevant information from these fragments.
-        """
-        
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
-        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-        
-        # If the combined report would be too large, we need a different approach
-        if estimated_tokens > self.token_limit_per_request:
-            logger.warning(f"Combined report would exceed token limit ({estimated_tokens} > {self.token_limit_per_request})")
-            return "The property documents require a more extensive analysis than can be provided in a single report. Please review the separate batch reports or contact support for assistance."
-        
-        # Check rate limit
-        wait_time = self._check_rate_limit(estimated_tokens)
-        if wait_time > 0:
-            logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before consolidating reports.")
-            await asyncio.sleep(wait_time)
-        
-        # Use the same retry mechanism as in the batch processing
-        max_retries = 3
-        backoff_factor = 2
-        
-        for attempt in range(max_retries):
+        for i, doc_text in enumerate(document_texts):
             try:
-                logger.info(f"Sending consolidation request to Groq API (attempt {attempt + 1}/{max_retries})")
+                logger.info(f"Processing document {i+1}/{len(document_texts)}")
                 
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=8000,
-                    temperature=0.2
-                )
-                
-                # Update token history
-                tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
-                self._update_token_history(tokens_used)
-                
-                logger.info(f"Report consolidation completed. Tokens used: {tokens_used}")
-                return response.choices[0].message.content
-                
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = backoff_factor ** attempt
-                    logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
+                prompt = ""
+                # For the first document, create a new report
+                if i == 0:
+                    prompt = f"""
+                    Analyze the following property document to generate an extremely detailed and comprehensive title search report. Pay particular attention to extracting EVERY entry in the chronological chain of title.
+
+                    ## Document Content:
+                    {doc_text}
+
+                    ## Instructions:
+                    You must carefully examine all pages of the land record document and extract EVERY detail to produce a comprehensive title search report with the following sections:
+
+                    1. **Basic Property Identification**
+                       - Survey/Block Number and UPIN
+                       - Village, Taluka and District location
+                       - Any Town Planning/Final Plot numbers
+                       - Boundaries or neighboring properties (if available)
+                       - Detailed property description including location indicators
+
+                    2. **Area and Assessment**
+                       - Total area in relevant measurement units (specify hectares, acres, square meters, etc.)
+                       - Assessment amount with currency
+                       - Breakdown of area by usage (residential, commercial, etc.)
+                       - Land use classification (agricultural, non-agricultural, etc.)
+                       - Any other area-related details mentioned in the record
+
+                    3. **Current Ownership**
+                       - Current owner's full name/entity with EXACT spelling from the record
+                       - How ownership was established (specific sale deed number, inheritance, etc.)
+                       - Exact date of current ownership acquisition
+                       - Transaction details including consideration amount, registration details
+                       - Percentage/share of ownership if multiple owners
+
+                    4. **EXHAUSTIVE Chronological Chain of Title**
+                       - Extract EVERY SINGLE entry from the "Entry Details" section of the record
+                       - Format as a detailed table with these columns:
+                          * Entry/Note Number
+                          * Entry Date
+                          * Transaction Type
+                          * Transferor(s) (seller/previous owner)
+                          * Transferee(s) (buyer/new owner)
+                          * Transaction Details
+                          * Consideration Amount (if sale)
+                          * Special Conditions or Notes
+                       - Present entries in strict chronological order from earliest to most recent
+                       - Include ALL entries visible in the document without omitting ANY details
+                       - For each entry, explain its significance to the chain of title
+                       - Do not summarize or abbreviate entries - include complete information
+                       - Ensure proper tracking of ownership shares/percentages when multiple owners
+                       - Cross-reference entry numbers mentioned in different sections of the document
+
+                    5. **Land Status Changes**
+                       - Detail ALL changes from agricultural to non-agricultural use
+                       - Include all permissions with dates, authority granting permission, and order numbers
+                       - List all premiums or fees paid for conversion with exact amounts
+                       - Document all development permissions with relevant details
+                       - Note any conditions attached to conversions or permissions
+
+                    6. **Comprehensive Encumbrances and Litigation History**
+                       - Extract ALL court cases from the document with their numbers and dates
+                       - Document the complete history of each case including:
+                          * Parties involved
+                          * Nature of dispute
+                          * Filing dates
+                          * Court/authority hearing the case
+                          * Case status (pending, disposed, etc.)
+                          * Final orders with dates and implications
+                       - Include ALL entries from the "Boja and Other Rights Details" section
+                       - Document ALL notices, attachments, or stays affecting the property
+                       - Note ALL mortgage details if mentioned
+
+                    7. **Rights and Restrictions**
+                       - Document ALL easements or rights of way
+                       - Extract ALL mortgage or loan details
+                       - List ALL government restrictions or conditions
+                       - Note ANY other restrictions on property usage
+
+                    8. **Revenue and Tax Status**
+                       - Current tax assessment with exact amount
+                       - Payment status if mentioned
+                       - Any arrears or dues
+                       - Historical tax assessment changes if available
+
+                    9. **Crop and Land Use History**
+                       - Extract information from the "Crop Details" section
+                       - Document historical crop patterns and land usage
+                       - Note irrigation details if mentioned
+
+                    10. **Additional Relevant Information**
+                        - Document ALL administrative changes affecting the property
+                        - Note ALL special conditions or observations
+                        - Include ANY other relevant information from the document
+
+                    11. **Conclusion and Recommendations**
+                        - Provide a clear statement on current ownership status
+                        - List ALL potential red flags or issues requiring attention
+                        - Offer specific recommendations for further verification
+                        - Comment on the completeness of the title based on the document
+
+                    FORMAT REQUIREMENTS:
+                    - Begin with a clear title and date of report
+                    - Use numbered sections with clear headings
+                    - Present the chain of title as a detailed chronological table
+                    - For entries with extensive details, provide complete information rather than summarizing
+                    - Bold key facts, dates, and figures
+                    - Ensure ALL information is directly extracted from the document
+                    - DO NOT invent or assume details not present in the document
+                    - If information appears to be missing or unclear, explicitly note this
+
+                    Your report MUST be EXHAUSTIVE - do not omit ANY details from the document. This report will be used for legal purposes, so accuracy and completeness are absolutely critical.
+                    """
+                # For subsequent documents, update the existing report
                 else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    raise
+                    prompt = f"""
+                    You are continuing a title search report analysis. Review the additional property document below and update or expand your previous analysis.
+
+                    ## Previous Analysis:
+                    {accumulated_report}
+
+                    ## New Document Content:
+                    {doc_text}
+
+                    ## Instructions:
+                    Carefully analyze this new document and update your previous title report. When updating:
+                    
+                    1. Integrate all new information with your previous analysis
+                    2. Maintain chronological order in the chain of title
+                    3. Add any new information about property identification, ownership, encumbrances, etc.
+                    4. Update sections as needed based on new information
+                    5. If there are conflicts between documents, note them explicitly
+                    6. Preserve the comprehensive structure of the report
+                    7. Ensure no details from the previous analysis or new document are omitted
+                    8. Update conclusions and recommendations based on the complete set of documents
+
+                    FORMAT REQUIREMENTS:
+                    - Maintain the same comprehensive structure as the previous report
+                    - Ensure ALL information is directly extracted from the documents
+                    - Bold all key facts, dates, and figures
+                    - Present complete information without summarizing
+                    - If information appears to be missing or unclear, explicitly note this
+
+                    Produce an updated, comprehensive report that incorporates ALL information from BOTH the previous analysis and this new document.
+                    """
                 
+                # Estimate tokens for this request
+                estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
                 
+                logger.debug(f"Estimated token usage for request {i+1}: {estimated_tokens}")
                 
-   
+                if estimated_tokens > self.token_limit_per_request:
+                    logger.warning(f"Request exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}).")
+                    return f"Error: Document {i+1} processing would exceed the token limit. Please split the document or modify the approach."
+                
+                # Check rate limit
+                wait_time = self._check_rate_limit(estimated_tokens)
+                if wait_time > 0:
+                    logger.info(f"Rate limit would be exceeded. Waiting {wait_time:.2f}s before processing document {i+1}.")
+                    await asyncio.sleep(wait_time)
+                # If at token limit, wait a full minute to clear the window
+                elif self._get_current_token_usage() >= self.token_limit_per_minute * 0.9:  # 90% threshold
+                    logger.info(f"Approaching rate limit. Pausing for 60 seconds before processing document {i+1}.")
+                    await asyncio.sleep(60)
+                
+                # Call Groq API with retry mechanism
+                max_retries = 3
+                backoff_factor = 2
+                
+                for attempt in range(max_retries):
+                    try:
+                        logger.info(f"Sending document {i+1} to Groq API (attempt {attempt + 1}/{max_retries})")
+                        
+                        response = self.client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {"role": "system", "content": system_message},
+                                {"role": "user", "content": prompt}
+                            ],
+                            max_tokens=8000,
+                            temperature=0.0  # Zero temperature for maximum factual accuracy
+                        )
+                        
+                        # Update token usage tracking
+                        tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
+                        self._update_token_history(tokens_used)
+                        
+                        # Update accumulated report with this response
+                        accumulated_report = response.choices[0].message.content
+                        
+                        logger.info(f"Document {i+1}/{len(document_texts)} processed successfully. Tokens used: {tokens_used}")
+                        break
+                        
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            wait_time = backoff_factor ** attempt
+                            logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logger.error(f"All retry attempts failed for document {i+1}: {str(e)}")
+                            raise
+            
+            except Exception as e:
+                logger.error(f"Error processing document {i+1}: {str(e)}")
+                return f"Error analyzing document {i+1}: {str(e)}"
+        
+        logger.info(f"Sequential analysis of {len(document_texts)} documents completed successfully")
+        return accumulated_report
