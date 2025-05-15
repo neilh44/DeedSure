@@ -5,6 +5,7 @@ import time
 import logging
 from collections import deque
 import re
+from datetime import datetime
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class LLMService:
         # LLaMA-3-8b-8192 has a context window of 2048 tokens
         self.model_context_window = 2048
         
-        # Document processing settings - based on reference
+        # Document processing settings
         self.chunk_size = 1000  # characters (roughly 300-350 tokens)
         self.chunk_overlap = 200  # character overlap between chunks
         self.max_input_tokens = 1200  # Reserve ~800 tokens for prompt and response
@@ -84,125 +85,220 @@ class LLMService:
         
         return wait_time
     
-    def _recursive_split_text(self, text: str) -> List[str]:
+    def _identify_document_sections(self, text: str) -> List[Dict[str, Any]]:
         """
-        Recursively split text using different separators to create logical chunks
-        Based on RecursiveCharacterTextSplitter approach
+        Identify logical sections in the document
         
         Args:
             text: Document text content
             
         Returns:
-            List of text chunks
+            List of sections with title and content
         """
-        # Define separators in order of priority
-        separators = [
-            "\n\n",  # Double line break (paragraphs)
-            "\n",    # Single line break
-            ". ",    # End of sentence
-            ", ",    # Comma clause
-            " ",     # Words
-            ""       # Characters
+        # Key section patterns for property documents
+        section_patterns = [
+            # Common section headers in property documents
+            r'(?i)(TITLE DEED|SALE DEED|CONVEYANCE DEED|LEASE DEED)',
+            r'(?i)(SCHEDULE OF PROPERTY|DESCRIPTION OF PROPERTY|THE SCHEDULE ABOVE REFERRED)',
+            r'(?i)(WITNESSETH|NOW THIS DEED|NOW THEREFORE)',
+            r'(?i)(WHEREAS|RECITALS|PREAMBLE)',
+            r'(?i)(BOUNDARIES|BOUNDED AS FOLLOWS)',
+            r'(?i)(TERMS AND CONDITIONS|COVENANTS)',
+            r'(?i)(IN WITNESS WHEREOF|SIGNED AND DELIVERED)',
+            r'(?i)(REGISTRATION DETAILS|REGISTRATION CERTIFICATE)',
+            r'(?i)(SURVEY DETAILS|SURVEY CERTIFICATE)',
+            r'(?i)(CHAIN OF TITLE|TITLE HISTORY)',
+            # Numbered sections and articles
+            r'(?i)(ARTICLE|CLAUSE|SECTION)\s+[IVXLCDM\d]+',
+            r'(?i)(\d+\.|\([a-z]\)|\([ivx]+\))'
         ]
         
-        # If text is already small enough, return it as a single chunk
-        if len(text) <= self.chunk_size:
-            return [text]
+        # Identify potential section breaks
+        section_breaks = [0]  # Start of document
         
-        # Try each separator
-        for separator in separators:
-            if separator == "":
-                # Character-level splitting as last resort
-                return [text[i:i+self.chunk_size] for i in range(0, len(text), self.chunk_size-self.chunk_overlap)]
+        # Find matches for section patterns
+        for pattern in section_patterns:
+            for match in re.finditer(pattern, text):
+                # Find the start of the line containing the match
+                line_start = text.rfind('\n', 0, match.start()) + 1
+                if line_start > 0:
+                    section_breaks.append(line_start)
+                else:
+                    section_breaks.append(match.start())
+        
+        # Also look for lines that are all uppercase (potential section headers)
+        lines = text.split('\n')
+        offset = 0
+        for line in lines:
+            stripped = line.strip()
+            # Check if line is mostly uppercase and at least 5 chars
+            if stripped and len(stripped) >= 5 and sum(1 for c in stripped if c.isupper()) / len(stripped) > 0.7:
+                section_breaks.append(offset)
+            offset += len(line) + 1  # +1 for newline
+        
+        # Add end of document
+        section_breaks.append(len(text))
+        
+        # Sort and deduplicate section breaks
+        section_breaks = sorted(set(section_breaks))
+        
+        # Create sections
+        sections = []
+        for i in range(len(section_breaks) - 1):
+            start = section_breaks[i]
+            end = section_breaks[i + 1]
             
-            # Split on this separator
-            if separator in text:
-                splits = text.split(separator)
+            # Get section content
+            section_content = text[start:end].strip()
+            if not section_content:
+                continue
                 
-                # If splitting results in pieces that are too large, continue to next separator
-                if max(len(s) for s in splits) > self.chunk_size:
+            # Get the first line as section title
+            lines = section_content.split('\n', 1)
+            title = lines[0].strip()
+            content = section_content
+            
+            sections.append({
+                "title": title,
+                "content": content,
+                "start": start,
+                "end": end
+            })
+        
+        # If no sections found, just split by paragraphs
+        if len(sections) <= 1:
+            paragraphs = re.split(r'\n\s*\n', text)
+            sections = []
+            
+            start = 0
+            for para in paragraphs:
+                if not para.strip():
                     continue
                 
-                # Recombine splits to form chunks of approximately the desired size
-                chunks = []
-                current_chunk = []
-                current_length = 0
+                end = start + len(para)
                 
-                for split in splits:
-                    split_with_sep = split if separator == "" else split + separator
-                    split_length = len(split_with_sep)
-                    
-                    # If this split would make the chunk too big, start a new chunk
-                    if current_length + split_length > self.chunk_size and current_chunk:
-                        chunks.append(separator.join(current_chunk))
-                        
-                        # For overlap, include the last piece(s) from the previous chunk
-                        overlap_length = 0
-                        overlap_pieces = []
-                        
-                        for piece in reversed(current_chunk):
-                            piece_length = len(piece) + len(separator)
-                            if overlap_length + piece_length <= self.chunk_overlap:
-                                overlap_pieces.insert(0, piece)
-                                overlap_length += piece_length
-                            else:
-                                break
-                                
-                        current_chunk = overlap_pieces
-                        current_length = overlap_length
-                    
-                    current_chunk.append(split)
-                    current_length += split_length
+                # Use first line or first few words as title
+                lines = para.split('\n', 1)
+                title = lines[0].strip()
+                if len(title) > 40:
+                    title = title[:40] + "..."
                 
-                # Add the last chunk if not empty
-                if current_chunk:
-                    chunks.append(separator.join(current_chunk))
+                sections.append({
+                    "title": title,
+                    "content": para.strip(),
+                    "start": start,
+                    "end": end
+                })
                 
-                return chunks
+                start = end + 2  # +2 for paragraph separator
         
-        # If we get here, no separator worked well - just use character-level splitting
-        return [text[i:i+self.chunk_size] for i in range(0, len(text), self.chunk_size-self.chunk_overlap)]
+        logger.info(f"Identified {len(sections)} logical sections in document")
+        return sections
     
-    def _split_documents(self, document_texts: List[str]) -> List[Dict[str, Any]]:
+    def _create_chunks(self, sections: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
         """
-        Split documents into overlapping chunks using recursive text splitter
+        Create overlapping chunks from document sections
         
         Args:
-            document_texts: List of document text contents
+            sections: List of document sections
+            text: Full document text
             
         Returns:
             List of chunks with metadata
         """
-        all_chunks = []
+        chunks = []
         
-        for doc_idx, doc_text in enumerate(document_texts):
-            # Add document metadata to help with context
-            doc_metadata = {
-                "document_index": doc_idx,
-                "total_documents": len(document_texts),
-                "document_length": len(doc_text),
-                "document_preview": doc_text[:100].replace('\n', ' ').strip() + "..."
-            }
+        # For very small documents, just use one chunk
+        if len(text) < self.chunk_size:
+            chunks.append({
+                "title": "Full Document",
+                "content": text,
+                "sections": [s["title"] for s in sections],
+                "tokens": self._estimate_tokens(text)
+            })
+            return chunks
             
-            # Split document using recursive text splitter
-            chunks = self._recursive_split_text(doc_text)
-            logger.info(f"Document {doc_idx+1} split into {len(chunks)} chunks")
+        # First pass: try to keep sections together if possible
+        for section in sections:
+            section_text = section["content"]
+            section_tokens = self._estimate_tokens(section_text)
             
-            # Add metadata to each chunk
-            for i, chunk_text in enumerate(chunks):
-                all_chunks.append({
-                    "content": chunk_text,
-                    "chunk_index": i,
-                    "total_chunks": len(chunks),
-                    "tokens": self._estimate_tokens(chunk_text),
-                    "document_index": doc_idx,
-                    "is_first_chunk": i == 0,
-                    "is_last_chunk": i == len(chunks) - 1,
-                    "metadata": doc_metadata
+            # If section fits in a chunk, keep it whole
+            if section_tokens <= self.max_input_tokens * 0.8:  # 80% of max to leave room for prompt
+                chunks.append({
+                    "title": section["title"],
+                    "content": section_text,
+                    "sections": [section["title"]],
+                    "tokens": section_tokens
                 })
+            else:
+                # Split large section into smaller chunks
+                chunk_texts = []
+                
+                # Try to split by paragraphs first
+                paragraphs = re.split(r'\n\s*\n', section_text)
+                
+                if len(paragraphs) > 1:
+                    # Process paragraphs
+                    current_chunk = []
+                    current_tokens = 0
+                    
+                    for para in paragraphs:
+                        para_tokens = self._estimate_tokens(para)
+                        
+                        # If adding this paragraph would exceed chunk size
+                        if current_tokens + para_tokens > self.chunk_size and current_chunk:
+                            # Add current chunk
+                            chunk_texts.append("\n\n".join(current_chunk))
+                            
+                            # Start new chunk with overlap
+                            overlap_content = current_chunk[-1] if current_chunk else ""
+                            current_chunk = [overlap_content, para] if overlap_content else [para]
+                            current_tokens = self._estimate_tokens("\n\n".join(current_chunk))
+                        else:
+                            current_chunk.append(para)
+                            current_tokens += para_tokens
+                    
+                    # Add the last chunk
+                    if current_chunk:
+                        chunk_texts.append("\n\n".join(current_chunk))
+                else:
+                    # If no paragraphs, split by sentences
+                    sentences = re.split(r'(?<=[.!?])\s+', section_text)
+                    
+                    current_chunk = []
+                    current_tokens = 0
+                    
+                    for sentence in sentences:
+                        sentence_tokens = self._estimate_tokens(sentence)
+                        
+                        if current_tokens + sentence_tokens > self.chunk_size and current_chunk:
+                            # Add current chunk
+                            chunk_texts.append(" ".join(current_chunk))
+                            
+                            # Start new chunk with overlap
+                            overlap_content = current_chunk[-1] if current_chunk else ""
+                            current_chunk = [overlap_content, sentence] if overlap_content else [sentence]
+                            current_tokens = self._estimate_tokens(" ".join(current_chunk))
+                        else:
+                            current_chunk.append(sentence)
+                            current_tokens += sentence_tokens
+                    
+                    # Add the last chunk
+                    if current_chunk:
+                        chunk_texts.append(" ".join(current_chunk))
+                
+                # Create chunks from the section parts
+                for i, chunk_text in enumerate(chunk_texts):
+                    chunks.append({
+                        "title": f"{section['title']} (Part {i+1}/{len(chunk_texts)})",
+                        "content": chunk_text,
+                        "sections": [section["title"]],
+                        "tokens": self._estimate_tokens(chunk_text)
+                    })
         
-        logger.info(f"Created {len(all_chunks)} total chunks from {len(document_texts)} documents")
-        return all_chunks
+        logger.info(f"Created {len(chunks)} chunks from document sections")
+        return chunks
     
     def _prepare_batches(self, document_texts: List[str]) -> List[Dict[str, Any]]:
         """
@@ -214,84 +310,99 @@ class LLMService:
         Returns:
             List of batch objects with processing information
         """
-        # Split documents into overlapping chunks
-        chunks = self._split_documents(document_texts)
+        all_chunks = []
+        
+        for doc_idx, doc_text in enumerate(document_texts):
+            # Get document metadata
+            doc_metadata = {
+                "document_index": doc_idx,
+                "document_length": len(doc_text)
+            }
+            
+            # Identify document sections
+            sections = self._identify_document_sections(doc_text)
+            
+            # Create chunks from sections
+            chunks = self._create_chunks(sections, doc_text)
+            
+            # Add document metadata to chunks
+            for chunk in chunks:
+                chunk["document_index"] = doc_idx
+                chunk["document_metadata"] = doc_metadata
+            
+            all_chunks.extend(chunks)
         
         # Create a batch for each chunk
         batches = []
         
-        for chunk in chunks:
-            # Create prompt for this chunk
-            prompt = self._create_prompt_for_chunk(chunk)
-            system_message = "You are a specialized legal assistant with expertise in property law and title searches."
+        for chunk_idx, chunk in enumerate(all_chunks):
+            # Create prompts optimized for extracting title report information
+            prompt = self._create_title_report_prompt(chunk, chunk_idx, len(all_chunks))
+            system_message = "You are a specialized legal assistant with expertise in property law and title searches in India."
             
-            # Calculate estimated tokens
-            overhead_tokens = self._estimate_tokens(system_message) + self._estimate_tokens(prompt) - chunk["tokens"]
-            estimated_tokens = overhead_tokens + chunk["tokens"]
-            
-            # Ensure it fits within limits
-            if estimated_tokens > self.max_input_tokens:
-                logger.warning(f"Chunk {chunk['chunk_index']} exceeds token limits. Truncating.")
-                # Calculate maximum content size
-                max_content_tokens = self.max_input_tokens - overhead_tokens - 50
-                max_content_chars = max_content_tokens * 3
-                
-                if len(chunk["content"]) > max_content_chars:
-                    chunk["content"] = chunk["content"][:max_content_chars]
-                    chunk["tokens"] = self._estimate_tokens(chunk["content"])
-                    chunk["truncated"] = True
-                    
-                    # Recalculate with truncated content
-                    prompt = self._create_prompt_for_chunk(chunk)
-                    estimated_tokens = overhead_tokens + chunk["tokens"]
+            # Estimate tokens
+            estimated_tokens = chunk["tokens"] + self._estimate_tokens(prompt) + self._estimate_tokens(system_message) - chunk["tokens"]
             
             batches.append({
                 "chunk": chunk,
                 "prompt": prompt,
                 "system_message": system_message,
-                "estimated_tokens": estimated_tokens
+                "estimated_tokens": estimated_tokens,
+                "chunk_index": chunk_idx,
+                "total_chunks": len(all_chunks)
             })
         
+        logger.info(f"Prepared {len(batches)} batches for processing")
         return batches
     
-    def _create_prompt_for_chunk(self, chunk: Dict[str, Any]) -> str:
+    def _create_title_report_prompt(self, chunk: Dict[str, Any], chunk_index: int, total_chunks: int) -> str:
         """
-        Create an appropriate prompt for a specific chunk
+        Create a prompt specifically designed to extract title report information
         
         Args:
             chunk: Document chunk with metadata
+            chunk_index: Index of this chunk
+            total_chunks: Total number of chunks
             
         Returns:
-            Prompt for this chunk
+            Prompt for title report extraction
         """
-        # Get chunk position context
-        position = ""
-        if chunk["is_first_chunk"]:
-            position = "This is the beginning of the document."
-        elif chunk["is_last_chunk"]:
-            position = "This is the end of the document."
-        else:
-            position = f"This is part {chunk['chunk_index']+1} of {chunk['total_chunks']} from the document."
+        # Determine chunk context
+        context = f"This is chunk {chunk_index+1} of {total_chunks} from document {chunk['document_index']+1}."
         
-        # Create prompt with context
+        # Create prompt focused on title report elements
         prompt = f"""
-        Analyze this portion of a legal document to extract relevant information for a title report.
+        Analyze this portion of a legal property document to extract information for a comprehensive title report:
+
+        {context}
+        Document section: {chunk['title']}
         
-        {position}
-        Document preview: {chunk['metadata']['document_preview']}
-        
-        Content to analyze:
+        DOCUMENT CONTENT:
         {chunk['content']}
         
-        Extract all property-related information from this section, including:
-        1. Property details (Survey/Plot numbers, measurements, location)
-        2. Party information (names, roles)
-        3. Transaction details with exact dates
-        4. Registration details (numbers, dates, offices)
-        5. Encumbrances or restrictions
-        6. Boundary information
+        Extract ALL of the following information EXACTLY AS IT APPEARS in the document (if present):
         
-        Format your response as a clear section that can be combined with analysis of other document parts.
+        1. PROPERTY DETAILS:
+           - Survey/Block/Plot numbers with exact identifiers
+           - Property measurements with exact figures
+           - Precise location details (village, city, district)
+           
+        2. OWNERSHIP HISTORY:
+           - Names of all parties in the chain of title
+           - Exact dates of all transfers and registrations
+           - Registration details with serial numbers
+           
+        3. ENCUMBRANCES:
+           - Any claims, mortgages, or restrictions on the property
+           - Details of any public notices
+           
+        4. BOUNDARIES:
+           - Properties/landmarks on all sides (North, South, East, West)
+           
+        5. SCHEDULE DESCRIPTION:
+           - The formal schedule of property description
+        
+        Format your response with clear section headings and PRESERVE ALL NUMBERS, DATES, AND NAMES EXACTLY as they appear in the document. If any information is not present in this section, indicate "Not found in this section".
         """
         
         return prompt
@@ -311,7 +422,7 @@ class LLMService:
         system_message = batch["system_message"]
         estimated_tokens = batch["estimated_tokens"]
         
-        logger.debug(f"Processing chunk {chunk['chunk_index']+1}/{chunk['total_chunks']} from document {chunk['document_index']+1}")
+        logger.debug(f"Processing chunk {batch['chunk_index']+1}/{batch['total_chunks']}")
         
         # Check rate limit
         wait_time = self._check_rate_limit(estimated_tokens)
@@ -323,7 +434,7 @@ class LLMService:
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"Sending chunk {chunk['chunk_index']+1} to Groq API (attempt {attempt+1}/{max_retries})")
+                logger.info(f"Sending chunk {batch['chunk_index']+1} to Groq API (attempt {attempt+1}/{max_retries})")
                 
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -332,7 +443,7 @@ class LLMService:
                         {"role": "user", "content": prompt}
                     ],
                     max_tokens=800,
-                    temperature=0.2
+                    temperature=0.1  # Lower temperature for more factual responses
                 )
                 
                 # Update token usage
@@ -341,17 +452,18 @@ class LLMService:
                 
                 logger.info(f"Chunk processed successfully. Tokens used: {tokens_used}")
                 
-                # Add chunk metadata to help with combining results
+                # Format result with section title
+                result = response.choices[0].message.content
+                
                 result_metadata = {
-                    "chunk_index": chunk["chunk_index"],
-                    "total_chunks": chunk["total_chunks"],
+                    "chunk_index": batch["chunk_index"],
+                    "total_chunks": batch["total_chunks"],
                     "document_index": chunk["document_index"],
                     "tokens_used": tokens_used,
-                    "is_first_chunk": chunk["is_first_chunk"],
-                    "is_last_chunk": chunk["is_last_chunk"]
+                    "section_title": chunk["title"]
                 }
                 
-                return response.choices[0].message.content, result_metadata, True
+                return result, result_metadata, True
                 
             except Exception as e:
                 error_message = str(e)
@@ -360,15 +472,13 @@ class LLMService:
                     logger.error(f"Context length exceeded: {error_message}")
                     
                     if attempt == max_retries - 1:
-                        return f"Error: Unable to process this section due to size constraints.", chunk, False
+                        return f"Error: Unable to process this section due to size constraints.", {"chunk_index": batch["chunk_index"]}, False
                     else:
                         # Simplify prompt for next attempt
                         prompt = f"""
-                        Extract property-related information from this legal document section:
+                        Analyze this legal document section and extract any property details, ownership information, and dates:
                         
                         {chunk['content'][:800]}...
-                        
-                        Focus on property details, parties, dates, and registrations.
                         """
                         system_message = "You are a legal assistant."
                 
@@ -378,7 +488,156 @@ class LLMService:
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"All retry attempts failed: {error_message}")
-                    return f"Error processing document section: {error_message}", chunk, False
+                    return f"Error processing document section: {error_message}", {"chunk_index": batch["chunk_index"]}, False
+    
+    async def _extract_title_report_elements(self, chunk_results: List[str]) -> Dict[str, str]:
+        """
+        Extract structured title report elements from chunk results
+        
+        Args:
+            chunk_results: List of analysis results from each chunk
+            
+        Returns:
+            Dictionary of title report elements
+        """
+        # Combine chunk results
+        combined_text = "\n\n".join(chunk_results)
+        
+        # Define regex patterns to extract key elements
+        patterns = {
+            "property_location": r'(?i)(?:located|situated)(?:\s+at|\s+in)?\s+([^\.]+)',
+            "survey_numbers": r'(?i)(?:Survey|S\.\s*No\.|Plot|Block)\s*(?:No\.)?\s*[:#]?\s*([A-Za-z0-9\-\/,\s]+)',
+            "property_size": r'(?i)(?:admeasuring|measuring|area|size)(?:\s+of)?\s+([0-9,\.]+\s*(?:square)?\s*(?:mts|meters|sq\.m|sq\.ft|acres|hectares|bigha|gunta))',
+            "original_owner": r'(?i)(?:originally\s+owned|first\s+owned|initial\s+owner)(?:\s+by)?\s+([^\.]+)',
+            "boundaries": r'(?i)(?:on\s+(?:the|or)?\s+(?:towards\s+(?:the)?)?\s+(north|south|east|west)\s*[:\.]\s*([^\.]+))',
+            "registration_details": r'(?i)(?:registration|registered|registry)(?:\s+on|\s+dated|\s+date|\s+details)?\s+([^\.]+)',
+            "dates": r'(?i)(?:dated|date)?\s+(\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}|\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4})'
+        }
+        
+        # Extract elements
+        extracted = {}
+        
+        for key, pattern in patterns.items():
+            matches = re.findall(pattern, combined_text, re.IGNORECASE)
+            if matches:
+                if key == "boundaries":
+                    # Special handling for boundaries
+                    boundaries = {}
+                    for direction, boundary in matches:
+                        boundaries[direction.lower()] = boundary.strip()
+                    extracted[key] = boundaries
+                else:
+                    # Remove duplicates while preserving order
+                    unique_matches = []
+                    for match in matches:
+                        if isinstance(match, str) and match.strip() not in unique_matches:
+                            unique_matches.append(match.strip())
+                    extracted[key] = unique_matches
+        
+        # Use more targeted prompt to extract chain of title
+        chain_prompt = f"""
+        Extract the chronological chain of title from these document analyses.
+        For each transfer, include:
+        1. The exact date
+        2. Names of transferor and transferee
+        3. Any registration numbers
+        
+        Present as numbered points in chronological order:
+        
+        {combined_text[:3500]}
+        """
+        
+        system_message = "You are a legal assistant specializing in property title searches."
+        
+        try:
+            chain_response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": chain_prompt}
+                ],
+                max_tokens=800,
+                temperature=0.1
+            )
+            
+            tokens_used = chain_response.usage.prompt_tokens + chain_response.usage.completion_tokens
+            self._update_token_history(tokens_used)
+            
+            extracted["chain_of_title"] = chain_response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"Error extracting chain of title: {str(e)}")
+            extracted["chain_of_title"] = "Could not determine chain of title from the provided documents."
+        
+        return extracted
+    
+    async def _generate_title_report(self, elements: Dict[str, Any]) -> str:
+        """
+        Generate a properly formatted title report
+        
+        Args:
+            elements: Dictionary of extracted title report elements
+            
+        Returns:
+            Formatted title report
+        """
+        # Format current date
+        current_date = datetime.now().strftime("%d/%m/%Y")
+        
+        # Prepare property description
+        property_desc = ""
+        if "survey_numbers" in elements and elements["survey_numbers"]:
+            property_desc += f"Survey/Plot No. {elements['survey_numbers'][0]} "
+            
+        if "property_size" in elements and elements["property_size"]:
+            property_desc += f"admeasuring {elements['property_size'][0]} "
+            
+        if "property_location" in elements and elements["property_location"]:
+            property_desc += f"located at {elements['property_location'][0]}"
+        
+        if not property_desc:
+            property_desc = "Property details could not be fully determined from the provided documents."
+        
+        # Prepare chain of title
+        chain_of_title = elements.get("chain_of_title", "Chain of title could not be determined from the provided documents.")
+        
+        # Prepare boundaries
+        boundaries = elements.get("boundaries", {})
+        boundary_text = ""
+        
+        for direction in ["east", "west", "north", "south"]:
+            if direction in boundaries:
+                boundary_text += f"On or towards the {direction.capitalize()}: {boundaries[direction]}\n"
+        
+        if not boundary_text:
+            boundary_text = "Property boundaries could not be determined from the provided documents."
+        
+        # Prepare report
+        report = f"""
+# REPORT ON TITLE
+Date: {current_date}
+
+Re.: {property_desc}
+
+That we have caused necessary searches to be taken with the available Revenue records and Sub-Registry Records for a period of last more than Thirty Years and on perusal and verification of documents of title deeds produced to us, we give our report on title in respect of said land as under:
+
+{chain_of_title}
+
+THE SCHEDULE ABOVE REFERRED TO
+
+ALL THAT piece and parcel of property {property_desc}.
+
+{boundary_text}
+
+[Note: This report is based on the documents provided for analysis. Additional documents may be required for a complete title search.]
+
+[Signature Block]
+        """
+        
+        # Clean up the report
+        report = re.sub(r'\n{3,}', '\n\n', report)
+        
+        return report.strip()
     
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
@@ -397,172 +656,35 @@ class LLMService:
         logger.info(f"Analyzing {len(document_texts)} documents with LLM using batching")
         
         try:
-            # Prepare batches with overlapping chunks
+            # Prepare batches with semantic chunking
             batches = self._prepare_batches(document_texts)
             
             if not batches:
                 return "Error: Failed to prepare document batches for processing."
             
             # Process each batch
-            results = []
-            metadata_list = []
+            chunk_results = []
             
             for i, batch in enumerate(batches):
                 logger.info(f"Processing batch {i+1}/{len(batches)}")
                 result, metadata, success = await self._process_batch(batch)
                 
-                # Add section header to help with report organization
                 if success:
-                    section_marker = f"### Document {metadata['document_index']+1} - Section {metadata['chunk_index']+1}\n\n"
-                    results.append(section_marker + result)
-                    metadata_list.append(metadata)
-                else:
-                    # Include error message
-                    section_marker = f"### Document {batch['chunk']['document_index']+1} - Section {batch['chunk']['chunk_index']+1} (Error)\n\n"
-                    results.append(section_marker + result)
+                    # Add section markers to help with information extraction
+                    section_result = f"# {metadata['section_title']}\n\n{result}"
+                    chunk_results.append(section_result)
             
-            # Generate the final report
-            combined_report = await self._generate_final_report(results, metadata_list, document_texts)
-            return combined_report
+            if not chunk_results:
+                return "Error: Unable to process any document sections successfully."
+            
+            # Extract title report elements from chunk results
+            elements = await self._extract_title_report_elements(chunk_results)
+            
+            # Generate final formatted title report
+            title_report = await self._generate_title_report(elements)
+            
+            return title_report
                 
         except Exception as e:
             logger.error(f"Error during document analysis: {str(e)}")
             return f"Error analyzing documents: {str(e)}"
-    
-    async def _extract_structured_information(self, chunk_results: List[str]) -> Dict[str, str]:
-        """
-        Extract structured information from chunk analysis results
-        
-        Args:
-            chunk_results: List of analysis results from each chunk
-            
-        Returns:
-            Dictionary of structured information categories
-        """
-        # Use a small portion of the results to fit context window
-        combined_text = "\n\n".join(chunk_results[:15])  # Limit to fit context
-        
-        prompt = f"""
-        Extract structured information from these document analyses for a title report:
-        
-        {combined_text[:3000]}
-        
-        Extract and summarize ONLY the following key categories:
-        
-        PROPERTY_DETAILS: [Property identifiers, measurements and location]
-        
-        OWNERSHIP: [All owners and transfers with dates]
-        
-        REGISTRATION: [Registration numbers, dates and offices]
-        
-        ENCUMBRANCES: [Any claims, mortgages or restrictions]
-        
-        BOUNDARIES: [Property boundaries]
-        
-        SCHEDULE: [The property schedule description]
-        """
-        
-        system_message = "You are a legal assistant extracting key information for a title report."
-        
-        # Check rate limit
-        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
-        wait_time = self._check_rate_limit(estimated_tokens)
-        if wait_time > 0:
-            await asyncio.sleep(wait_time)
-        
-        try:
-            logger.info("Extracting structured information from chunk results")
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=800,
-                temperature=0.2
-            )
-            
-            tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
-            self._update_token_history(tokens_used)
-            
-            # Parse the response into structured categories
-            result = response.choices[0].message.content
-            structured_info = {}
-            
-            # Extract each category using regex
-            for category in ["PROPERTY_DETAILS", "OWNERSHIP", "REGISTRATION", "ENCUMBRANCES", "BOUNDARIES", "SCHEDULE"]:
-                pattern = f"{category}:\\s*(.*?)(?=\\n\\n[A-Z_]+:|$)"
-                match = re.search(pattern, result, re.DOTALL)
-                if match:
-                    structured_info[category.lower()] = match.group(1).strip()
-                else:
-                    structured_info[category.lower()] = f"No {category.lower()} information identified."
-            
-            return structured_info
-            
-        except Exception as e:
-            logger.error(f"Error extracting structured information: {str(e)}")
-            return {
-                'property_details': "Please review the document analyses for property details.",
-                'ownership': "Please review the document analyses for ownership information.",
-                'registration': "Please review the document analyses for registration details.",
-                'encumbrances': "Please review the document analyses for encumbrance information.",
-                'boundaries': "Please review the document analyses for boundary information.",
-                'schedule': "Please review the document analyses for schedule information."
-            }
-    
-    async def _generate_final_report(self, chunk_results: List[str], 
-                               chunk_metadata: List[Dict[str, Any]],
-                               document_texts: List[str]) -> str:
-        """
-        Generate the final title report from all chunk results
-        
-        Args:
-            chunk_results: List of analysis results from each chunk
-            chunk_metadata: List of metadata for each chunk
-            document_texts: Original document texts
-            
-        Returns:
-            Final title report
-        """
-        logger.info(f"Generating final report from {len(chunk_results)} chunk results")
-        
-        # Extract structured information categories
-        structured_info = await self._extract_structured_information(chunk_results)
-        
-        # Generate formatted report
-        current_date = time.strftime("%B %d, %Y")
-        
-        report = f"""
-# REPORT ON TITLE
-Date: {current_date}
-
-## PROPERTY DETAILS
-{structured_info.get('property_details', 'Property details could not be determined from the provided documents.')}
-
-## OWNERSHIP AND CHAIN OF TITLE
-{structured_info.get('ownership', 'Ownership information could not be determined from the provided documents.')}
-
-## REGISTRATION DETAILS
-{structured_info.get('registration', 'Registration details could not be determined from the provided documents.')}
-
-## ENCUMBRANCES
-{structured_info.get('encumbrances', 'No encumbrances were identified in the provided documents.')}
-
-## BOUNDARIES
-{structured_info.get('boundaries', 'Property boundaries could not be determined from the provided documents.')}
-
-## THE SCHEDULE ABOVE REFERRED TO
-{structured_info.get('schedule', 'Schedule details could not be determined from the provided documents.')}
-
----
-
-This report was generated based on {len(document_texts)} document(s) processed in {len(chunk_results)} sections.
-For a comprehensive title search, please consult with a legal professional.
-"""
-        
-        # Clean up the report
-        report = re.sub(r'\n{3,}', '\n\n', report)
-        
-        return report.strip()
