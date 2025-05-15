@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import groq
 import time
 import logging
@@ -17,9 +17,13 @@ class LLMService:
         
         # Rate limiting settings
         self.token_limit_per_minute = 5500
-        self.token_limit_per_request = 6000  # New per-request token limit
+        self.token_limit_per_request = 6000  # Enforced max tokens per request
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
+        
+        # Document processing settings
+        self.max_document_chunk_size = 4000  # Max tokens for a document chunk
+        self.max_batch_document_tokens = 4000  # Max total document tokens per batch
         
         logger.info(f"LLMService initialized with model {self.model}, token limit {self.token_limit_per_minute}/minute, and {self.token_limit_per_request}/request")
     
@@ -74,88 +78,182 @@ class LLMService:
         
         return wait_time
     
-    def _split_documents_into_batches(self, document_texts: List[str]) -> List[List[str]]:
+    def _chunk_document(self, document: str) -> List[str]:
         """
-        Split documents into batches to ensure each batch stays under the token limit
+        Split a large document into smaller chunks that fit within token limits
+        
+        Args:
+            document: Document text content
+            
+        Returns:
+            List of document chunks
+        """
+        doc_tokens = self._estimate_tokens(document)
+        
+        if doc_tokens <= self.max_document_chunk_size:
+            return [document]
+            
+        logger.info(f"Chunking large document ({doc_tokens} est. tokens) into smaller parts")
+        
+        # Split by paragraphs first
+        paragraphs = document.split("\n\n")
+        chunks = []
+        current_chunk = []
+        current_chunk_tokens = 0
+        
+        for paragraph in paragraphs:
+            para_tokens = self._estimate_tokens(paragraph)
+            
+            # If a single paragraph is too large, split it by sentences
+            if para_tokens > self.max_document_chunk_size:
+                logger.warning(f"Large paragraph found ({para_tokens} tokens). Splitting by sentences.")
+                sentences = paragraph.replace('. ', '.\n').split('\n')
+                
+                for sentence in sentences:
+                    sent_tokens = self._estimate_tokens(sentence)
+                    
+                    # If adding this sentence would exceed the chunk size, create a new chunk
+                    if current_chunk_tokens + sent_tokens > self.max_document_chunk_size and current_chunk:
+                        chunks.append("\n\n".join(current_chunk))
+                        current_chunk = [sentence]
+                        current_chunk_tokens = sent_tokens
+                    else:
+                        current_chunk.append(sentence)
+                        current_chunk_tokens += sent_tokens
+            
+            # Handle paragraph that fits within limit
+            elif current_chunk_tokens + para_tokens > self.max_document_chunk_size and current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk = [paragraph]
+                current_chunk_tokens = para_tokens
+            else:
+                current_chunk.append(paragraph)
+                current_chunk_tokens += para_tokens
+        
+        # Add the last chunk if not empty
+        if current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+        
+        logger.info(f"Document chunked into {len(chunks)} parts")
+        return chunks
+    
+    def _prepare_batches(self, document_texts: List[str]) -> List[List[str]]:
+        """
+        Process documents and create batches that respect token limits
         
         Args:
             document_texts: List of document text contents
             
         Returns:
-            List of document batches, where each batch is a list of document texts
+            List of document batches, where each batch is a list of document text chunks
         """
+        # First, split large documents into chunks
+        all_chunks = []
+        for doc in document_texts:
+            chunks = self._chunk_document(doc)
+            all_chunks.extend(chunks)
+        
+        # Calculate estimated prompt overhead tokens (system message + template)
+        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
+        prompt_template = """
+        You are a specialized legal assistant with expertise in property law and title searches. 
+        Analyze the following property documents to generate a comprehensive title report.
+
+        ## Instructions:
+        1. Extract all relevant property details (IDs, measurements, locations)
+        2. Identify all parties in the chain of title chronologically
+        3. Note all transfers, deeds, and official registrations with dates
+        4. Document any encumbrances, restrictions or claims
+        5. Flag any potential title issues or missing information
+        6. Format the report according to the standardized template below
+
+        ## Document Content:
+        {combined_text}
+
+        ## Title Report Format:
+        [template content]
+        """
+        
+        overhead_tokens = self._estimate_tokens(system_message) + self._estimate_tokens(prompt_template)
+        # Add buffer for API overhead and response
+        safety_buffer = 500
+        max_chunk_tokens_per_batch = self.token_limit_per_request - overhead_tokens - safety_buffer
+        
+        # Now create batches from the chunks
         batches = []
         current_batch = []
         current_batch_tokens = 0
-        system_message = "You are a specialized legal assistant with expertise in property law and title searches."
         
-        # Reserve tokens for system message and prompt template (approximately)
-        prompt_template_tokens = self._estimate_tokens("""
-            You are a specialized legal assistant with expertise in property law and title searches. 
-            Analyze the following property documents to generate a comprehensive title report.
-
-            ## Instructions:
-            1. Extract all relevant property details (IDs, measurements, locations)
-            2. Identify all parties in the chain of title chronologically
-            3. Note all transfers, deeds, and official registrations with dates
-            4. Document any encumbrances, restrictions or claims
-            5. Flag any potential title issues or missing information
-            6. Format the report according to the standardized template below
-
-            ## Document Content:
-            {combined_text}
-
-            ## Title Report Format:
-            [rest of template]
-        """)
-        
-        # Reserve tokens for the system message and prompt template
-        reserved_tokens = self._estimate_tokens(system_message) + prompt_template_tokens
-        # Set a max token count for documents in a single batch
-        max_batch_tokens = self.token_limit_per_request - reserved_tokens - 500  # 500 token buffer
-        
-        for doc in document_texts:
-            doc_tokens = self._estimate_tokens(doc)
+        for chunk in all_chunks:
+            chunk_tokens = self._estimate_tokens(chunk)
             
-            # If a single document is too big to fit in one batch, we need to split it
-            if doc_tokens > max_batch_tokens:
-                logger.warning(f"Document too large ({doc_tokens} est. tokens). Consider preprocessing to split large documents.")
-                # If there are documents in the current batch, add them as a batch first
-                if current_batch:
-                    batches.append(current_batch)
-                    current_batch = []
-                    current_batch_tokens = 0
-                
-                # Add this large document as its own batch
-                # In a more advanced implementation, you might split the document itself
-                batches.append([doc])
-                continue
-                
-            # If adding this document would exceed the batch token limit
-            if current_batch_tokens + doc_tokens > max_batch_tokens and current_batch:
+            # Verify each chunk is within limits
+            if chunk_tokens > max_chunk_tokens_per_batch:
+                logger.warning(f"Chunk still too large ({chunk_tokens} tokens) even after splitting. " +
+                             f"Truncating to {max_chunk_tokens_per_batch} tokens.")
+                # Truncate the chunk if it's still too large
+                chunk = chunk[:max_chunk_tokens_per_batch * 4]  # Approximate chars to tokens
+                chunk_tokens = self._estimate_tokens(chunk)
+            
+            # If adding this chunk would exceed the batch token limit
+            if current_batch_tokens + chunk_tokens > max_chunk_tokens_per_batch and current_batch:
                 batches.append(current_batch)
-                current_batch = [doc]
-                current_batch_tokens = doc_tokens
+                current_batch = [chunk]
+                current_batch_tokens = chunk_tokens
             else:
-                current_batch.append(doc)
-                current_batch_tokens += doc_tokens
+                current_batch.append(chunk)
+                current_batch_tokens += chunk_tokens
         
         # Add the last batch if not empty
         if current_batch:
             batches.append(current_batch)
             
-        logger.info(f"Split {len(document_texts)} documents into {len(batches)} batches")
+        logger.info(f"Created {len(batches)} batches from {len(all_chunks)} document chunks")
+        
+        # Verify all batches are within token limits
+        for i, batch in enumerate(batches):
+            batch_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
+            batch_tokens = self._estimate_tokens(batch_text) + overhead_tokens
+            
+            if batch_tokens > self.token_limit_per_request:
+                logger.warning(f"Batch {i+1} exceeds token limit ({batch_tokens} tokens). Adjusting...")
+                # This should not happen with proper chunking, but as a safety measure,
+                # recreate this batch with fewer chunks
+                new_batch = []
+                new_batch_tokens = 0
+                
+                for chunk in batch:
+                    chunk_tokens = self._estimate_tokens(chunk)
+                    if new_batch_tokens + chunk_tokens + overhead_tokens <= self.token_limit_per_request:
+                        new_batch.append(chunk)
+                        new_batch_tokens += chunk_tokens
+                    else:
+                        # This chunk doesn't fit, start a new batch
+                        break
+                
+                if new_batch:
+                    batches[i] = new_batch
+                    # Handle remaining chunks in the future
+                else:
+                    logger.error(f"Failed to create valid batch. First chunk too large.")
+                    # Keep just the first chunk but truncate it
+                    if batch:
+                        first_chunk = batch[0]
+                        max_chars = (self.token_limit_per_request - overhead_tokens - safety_buffer) * 4
+                        truncated_chunk = first_chunk[:max_chars]
+                        batches[i] = [truncated_chunk]
+        
         return batches
     
-    async def _process_batch(self, batch: List[str]) -> str:
+    async def _process_batch(self, batch: List[str]) -> Tuple[str, bool]:
         """
-        Process a single batch of documents
+        Process a single batch of document chunks
         
         Args:
-            batch: List of document text contents for this batch
+            batch: List of document text chunks for this batch
             
         Returns:
-            Analysis result for this batch
+            Tuple of (analysis result, success flag)
         """
         combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
         
@@ -220,14 +318,14 @@ class LLMService:
         logger.debug(f"Estimated token usage for batch request: {estimated_tokens}")
         
         if estimated_tokens > self.token_limit_per_request:
-            logger.warning(f"Batch exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}). Consider reducing batch size.")
+            logger.error(f"Batch exceeds token limit ({estimated_tokens} > {self.token_limit_per_request}) even after preprocessing.")
+            return f"Error: Document too large to process within token limits ({estimated_tokens} tokens).", False
         
         # Check rate limit
         wait_time = self._check_rate_limit(estimated_tokens)
         if wait_time > 0:
-            # Wait until we can process this request
             logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before sending request.")
-            await asyncio.sleep(wait_time)  # Using asyncio.sleep for async compatibility
+            await asyncio.sleep(wait_time)
         
         # Call Groq API with retry mechanism
         max_retries = 3
@@ -237,13 +335,14 @@ class LLMService:
             try:
                 logger.info(f"Sending batch request to Groq API (attempt {attempt + 1}/{max_retries})")
                 
+                # Limit tokens in both directions
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=8000,
+                    max_tokens=4000,  # Limit the response size
                     temperature=0.2
                 )
                 
@@ -252,16 +351,37 @@ class LLMService:
                 self._update_token_history(tokens_used)
                 
                 logger.info(f"Batch analysis completed. Tokens used: {tokens_used}")
-                return response.choices[0].message.content
+                return response.choices[0].message.content, True
                 
             except Exception as e:
-                if attempt < max_retries - 1:
+                error_message = str(e)
+                
+                # Check for token limit exceeded errors specifically
+                if "413" in error_message and "too large" in error_message:
+                    logger.error(f"Request too large for API: {error_message}")
+                    if attempt == max_retries - 1:
+                        # This is the last attempt, return error
+                        return f"Error: Unable to process document due to size constraints. Please break down the document into smaller parts.", False
+                    else:
+                        # Reduce prompt size for next attempt by truncating the document content
+                        logger.warning(f"Reducing content size for next attempt")
+                        # Cut the batch in half for the next attempt
+                        if len(batch) > 1:
+                            batch = batch[:len(batch)//2]
+                        else:
+                            # If only one chunk, truncate it
+                            batch[0] = batch[0][:len(batch[0])//2]
+                        combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(batch)
+                        prompt = prompt.replace("{combined_text}", combined_text)
+                        estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
+                        logger.info(f"Reduced content size, new token estimate: {estimated_tokens}")
+                elif attempt < max_retries - 1:
                     wait_time = backoff_factor ** attempt
-                    logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
+                    logger.warning(f"API call failed: {error_message}. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    raise
+                    logger.error(f"All retry attempts failed: {error_message}")
+                    return f"Error processing documents: {error_message}", False
     
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
@@ -280,25 +400,39 @@ class LLMService:
         logger.info(f"Analyzing {len(document_texts)} documents with LLM using batching")
         
         try:
-            # Split documents into batches
-            batches = self._split_documents_into_batches(document_texts)
+            # Prepare batches with proper chunking
+            batches = self._prepare_batches(document_texts)
+            
+            if not batches:
+                return "Error: Failed to prepare document batches for processing."
             
             if len(batches) == 1:
                 # If there's only one batch, process it directly
-                return await self._process_batch(batches[0])
+                result, success = await self._process_batch(batches[0])
+                return result
             else:
                 # For multiple batches, process each and combine results
                 batch_results = []
+                all_succeeded = True
                 
                 for i, batch in enumerate(batches):
-                    logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} documents")
-                    result = await self._process_batch(batch)
-                    batch_results.append(result)
+                    logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} chunks")
+                    result, success = await self._process_batch(batch)
+                    if success:
+                        batch_results.append(result)
+                    else:
+                        all_succeeded = False
+                        batch_results.append(f"Batch {i+1} analysis failed: {result}")
                 
                 # Now we need to combine the results
-                # For a title report, we might need a separate processing step
-                combined_report = await self._combine_batch_reports(batch_results)
-                return combined_report
+                # Only attempt to combine if we have some successful results
+                if batch_results and any(not r.startswith("Error") and not r.startswith("Batch") for r in batch_results):
+                    combined_report = await self._combine_batch_reports(batch_results)
+                    return combined_report
+                elif not all_succeeded:
+                    return "Error: Failed to process one or more document batches. Please review the individual errors or try with smaller documents."
+                else:
+                    return "Error: No successful document analysis to report."
                 
         except Exception as e:
             logger.error(f"Error during document analysis: {str(e)}")
@@ -344,12 +478,60 @@ class LLMService:
         system_message = "You are a specialized legal assistant with expertise in property law and title searches."
         estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
         
-        # If the combined report would be too large, we need a different approach
+        # If the combined report would be too large, we need to process it in batches too
         if estimated_tokens > self.token_limit_per_request:
             logger.warning(f"Combined report would exceed token limit ({estimated_tokens} > {self.token_limit_per_request})")
-            return "The property documents require a more extensive analysis than can be provided in a single report. Please review the separate batch reports or contact support for assistance."
+            
+            # Split the batch results into smaller groups
+            max_batch_results = 3  # Process 3 results at a time
+            result_batches = [batch_results[i:i+max_batch_results] for i in range(0, len(batch_results), max_batch_results)]
+            
+            intermediate_results = []
+            for i, result_batch in enumerate(result_batches):
+                logger.info(f"Processing intermediate combination batch {i+1}/{len(result_batches)}")
+                batch_text = "\n\n---REPORT SEPARATOR---\n\n".join(result_batch)
+                
+                intermediate_prompt = prompt.replace("{combined_text}", batch_text)
+                estimated_tokens = self._estimate_tokens(intermediate_prompt) + self._estimate_tokens(system_message)
+                
+                if estimated_tokens > self.token_limit_per_request:
+                    logger.warning(f"Intermediate batch still too large ({estimated_tokens} tokens). Using first result only.")
+                    intermediate_results.append(result_batch[0])
+                    continue
+                
+                # Process this intermediate batch
+                wait_time = self._check_rate_limit(estimated_tokens)
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": intermediate_prompt}
+                        ],
+                        max_tokens=4000,
+                        temperature=0.2
+                    )
+                    
+                    tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
+                    self._update_token_history(tokens_used)
+                    
+                    intermediate_results.append(response.choices[0].message.content)
+                except Exception as e:
+                    logger.error(f"Error combining intermediate results: {str(e)}")
+                    # If combination fails, just use the first result from this batch
+                    if result_batch:
+                        intermediate_results.append(result_batch[0])
+            
+            # Now combine the intermediate results
+            if len(intermediate_results) == 1:
+                return intermediate_results[0]
+            else:
+                return await self._combine_batch_reports(intermediate_results)
         
-        # Check rate limit
+        # Standard processing for reports that fit within limits
         wait_time = self._check_rate_limit(estimated_tokens)
         if wait_time > 0:
             logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before consolidating reports.")
@@ -369,7 +551,7 @@ class LLMService:
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=8000,
+                    max_tokens=4000,
                     temperature=0.2
                 )
                 
@@ -381,10 +563,21 @@ class LLMService:
                 return response.choices[0].message.content
                 
             except Exception as e:
-                if attempt < max_retries - 1:
+                error_message = str(e)
+                
+                # Check for token limit exceeded errors
+                if "413" in error_message and "too large" in error_message:
+                    logger.error(f"Consolidation request too large: {error_message}")
+                    if attempt == max_retries - 1:
+                        # On last attempt, return a simple combination
+                        return "## CONSOLIDATED TITLE REPORT\n\nThis report combines multiple analyses due to document size.\n\n" + \
+                               "\n\n---SECTION DIVIDER---\n\n".join(batch_results[:3]) + \
+                               "\n\n(Some sections may have been omitted due to size constraints.)"
+                elif attempt < max_retries - 1:
                     wait_time = backoff_factor ** attempt
-                    logger.warning(f"API call failed: {str(e)}. Retrying in {wait_time}s...")
+                    logger.warning(f"API call failed: {error_message}. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    raise
+                    logger.error(f"All retry attempts failed: {error_message}")
+                    return "## CONSOLIDATED TITLE REPORT\n\nDue to processing limitations, here are the key sections of the report:\n\n" + \
+                           "\n\n---SECTION DIVIDER---\n\n".join(batch_results[:2])
