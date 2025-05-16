@@ -115,11 +115,17 @@ class LLMService:
             8. Outcome/Status - e.g., Approved, Rejected, Pending
 
             Pay special attention to:
+            - All ENCUMBRANCES including loans, mortgages, liens, charges, and easements (બોજો)
+            - Sale transactions (વેચાણ) with complete details of sellers and buyers
+            - Loan entries (બોજોદાખલ) including lender name, borrower, loan amount, and property details
+            - Removal of encumbrances (બોજા મુક્તિ) or loan satisfactions
             - Non-agricultural conversion orders (બીન ખેતી)
             - Mutation entries (નોંધ)
             - Land division/consolidation (ટુકડો/એકત્રીકરણ)
             - Court orders or collector decisions
             - Inheritance transfers
+
+
 
             ## Document Content to Analyze:
             {combined_text}
@@ -172,13 +178,33 @@ class LLMService:
                 v
             Current Owners: [Names]
 
+            ## SALES TRANSACTIONS & LOAN ENTRIES
+            List all sales transactions and loan entries separately in chronological order:
+
+            ### Sales Transactions:
+            1. Date: [DD/MM/YYYY] - Entry No: [Number]
+            Seller: [Name(s)]
+            Buyer: [Name(s)]
+            Property: [Description]
+            Amount: [Sale value if available]
+            Status: [Approved/Rejected/Pending]
+            
+            ### Loan/Mortgage Entries:
+            1. Date: [DD/MM/YYYY] - Entry No: [Number]
+            Lender: [Financial institution/Person]
+            Borrower: [Name(s)]
+            Property: [Description]
+            Loan Amount: [Value with currency]
+            Status: [Active/Satisfied/Cancelled]
 
             ## CURRENT OWNERSHIP
             Based on the above chain of title, the current legal owner(s) of the property is/are [Names] as evidenced by Entry No. [Number] dated [Date].
 
             ## NOTABLE OBSERVATIONS
-            - [Any gaps or inconsistencies in documentation]
+            -- [Any gaps or inconsistencies in documentation]
             - [Any encumbrances or restrictions on the property]
+            - [Any rejected transactions and reasons]
+            - [Any pending government orders or proceedings]
             - [Any other important observations]
             """
             
