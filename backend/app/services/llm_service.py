@@ -18,7 +18,7 @@ class LLMService:
             raise ValueError("OPENAI_API_KEY environment variable must be set")
             
         self.client = openai.OpenAI(api_key=openai_api_key)
-        self.model = os.environ.get("LLM_MODEL", "gpt-4o")  # Default to GPT-4o if not specified
+        self.model = os.environ.get("LLM_MODEL", "gpt-4.1")  # Default to GPT-4o if not specified
         
         # Rate limiting settings
         self.token_limit_per_minute = 40000
