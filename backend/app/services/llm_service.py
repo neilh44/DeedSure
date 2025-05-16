@@ -206,6 +206,16 @@ class LLMService:
             - [Any rejected transactions and reasons]
             - [Any pending government orders or proceedings]
             - [Any other important observations]
+
+            ## CHRONOLOGICAL HIERARCHY OF EVENTS
+
+            • **DD/MM/YYYY:** [Construct a single comprehensive sentence that includes all details about this event - who transferred what to whom, the type of transaction, document references, property details, amounts, and official status. Format each event as a complete sentence that flows naturally despite containing multiple data points. Include parenthetical references for document numbers, dates, and clarifying information. End with the entry number reference.]
+
+            • **DD/MM/YYYY:** [Next event in the same format]
+
+            [Continue for all events in strict chronological order]
+
+
             """
             
             # Estimate tokens for this request (prompt + system message)
