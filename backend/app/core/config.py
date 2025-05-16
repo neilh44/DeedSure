@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     
     # Groq API settings
     GROQ_API_KEY: str
-    LLM_MODEL: str = "llama-3.3-70b-versatile"
+    LLM_MODEL: str = "llama3-8b-8192"
     
     # CORS settings
     BACKEND_CORS_ORIGINS: List[str] = [

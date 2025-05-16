@@ -16,7 +16,7 @@ class LLMService:
         self.model = settings.LLM_MODEL
         
         # Rate limiting settings
-        self.token_limit_per_minute = 50000
+        self.token_limit_per_minute = 7000
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
         
@@ -25,9 +25,9 @@ class LLMService:
     def _estimate_tokens(self, text: str) -> int:
         """
         Roughly estimate the number of tokens in the text.
-        For GPT models, ~4 chars ≈ 1 token, but this is a simple approximation.
+        For GPT models, ~1 chars ≈ 1 token, but this is a simple approximation.
         """
-        return len(text) // 4
+        return len(text) // 1
     
     def _update_token_history(self, tokens_used: int) -> None:
         """
