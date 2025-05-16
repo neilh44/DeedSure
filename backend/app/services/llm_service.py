@@ -1,22 +1,27 @@
 import asyncio
 from typing import Dict, Any, List, Optional
-import groq
+import openai
 import time
 import logging
 from collections import deque
-from app.core.config import settings
+import os
 
 logger = logging.getLogger(__name__)
 
 class LLMService:
-    """Service for interacting with Groq LLM API with rate limiting and error handling"""
+    """Service for interacting with OpenAI API with rate limiting and error handling"""
     
     def __init__(self):
-        self.client = groq.Client(api_key=settings.GROQ_API_KEY)
-        self.model = settings.LLM_MODEL
+        # Get OpenAI API key from environment variables
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY environment variable must be set")
+            
+        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.model = os.environ.get("LLM_MODEL", "gpt-4o")  # Default to GPT-4o if not specified
         
         # Rate limiting settings
-        self.token_limit_per_minute = 7000
+        self.token_limit_per_minute = 40000
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
         
@@ -25,9 +30,9 @@ class LLMService:
     def _estimate_tokens(self, text: str) -> int:
         """
         Roughly estimate the number of tokens in the text.
-        For GPT models, ~1 chars ≈ 1 token, but this is a simple approximation.
+        For OpenAI models, ~4 chars ≈ 1 token, but this is a simple approximation.
         """
-        return len(text) // 1
+        return len(text) // 4
     
     def _update_token_history(self, tokens_used: int) -> None:
         """
@@ -75,7 +80,7 @@ class LLMService:
     
     async def analyze_documents(self, document_texts: List[str]) -> str:
         """
-        Send documents to LLM for title report generation with rate limiting
+        Send documents to OpenAI for title report generation with rate limiting
         
         Args:
             document_texts: List of document text contents
@@ -87,7 +92,7 @@ class LLMService:
             logger.warning("No document texts provided for analysis")
             return "Error: No documents provided for analysis."
             
-        logger.info(f"Analyzing {len(document_texts)} documents with LLM")
+        logger.info(f"Analyzing {len(document_texts)} documents with OpenAI")
         
         try:
             combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(document_texts)
@@ -172,13 +177,13 @@ class LLMService:
                 logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before sending request.")
                 await asyncio.sleep(wait_time)  # Using asyncio.sleep for async compatibility
             
-            # Call Groq API with retry mechanism
+            # Call OpenAI API with retry mechanism
             max_retries = 3
             backoff_factor = 2
             
             for attempt in range(max_retries):
                 try:
-                    logger.info(f"Sending request to Groq API (attempt {attempt + 1}/{max_retries})")
+                    logger.info(f"Sending request to OpenAI API (attempt {attempt + 1}/{max_retries})")
                     
                     response = self.client.chat.completions.create(
                         model=self.model,
@@ -194,7 +199,7 @@ class LLMService:
                     tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
                     self._update_token_history(tokens_used)
                     
-                    logger.info(f"LLM analysis completed successfully. Tokens used: {tokens_used}")
+                    logger.info(f"OpenAI analysis completed successfully. Tokens used: {tokens_used}")
                     return response.choices[0].message.content
                     
                 except Exception as e:
@@ -209,3 +214,12 @@ class LLMService:
         except Exception as e:
             logger.error(f"Error during document analysis: {str(e)}")
             return f"Error analyzing documents: {str(e)}"
+            
+# Example usage:
+# async def main():
+#     service = LLMService()
+#     result = await service.analyze_documents(["Your document text here"])
+#     print(result)
+# 
+# if __name__ == "__main__":
+#     asyncio.run(main())
