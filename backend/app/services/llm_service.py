@@ -4,43 +4,56 @@ import groq
 import time
 import logging
 from collections import deque
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 class LLMService:
     """Service for interacting with Groq LLM API with rate limiting and error handling"""
     
-    def __init__(self, api_key: str, model: str = "llama3-70b-8192"):
-        self.client = groq.Client(api_key=api_key)
-        self.model = model
+    def __init__(self):
+        self.client = groq.Client(api_key=settings.GROQ_API_KEY)
+        self.model = settings.LLM_MODEL
         
         # Rate limiting settings
         self.token_limit_per_minute = 50000
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
         
-        logger.info(f"LLMService initialized with model {self.model}")
+        logger.info(f"LLMService initialized with model {self.model} and token limit {self.token_limit_per_minute}/minute")
     
     def _estimate_tokens(self, text: str) -> int:
-        """Roughly estimate the number of tokens in the text."""
+        """
+        Roughly estimate the number of tokens in the text.
+        For GPT models, ~4 chars ≈ 1 token, but this is a simple approximation.
+        """
         return len(text) // 4
     
     def _update_token_history(self, tokens_used: int) -> None:
-        """Add tokens to history and remove entries older than window size"""
+        """
+        Add tokens to history and remove entries older than window size
+        """
         current_time = time.time()
         self.token_history.append((current_time, tokens_used))
         
         # Remove entries older than our window
         while self.token_history and self.token_history[0][0] < current_time - self.window_size_seconds:
             self.token_history.popleft()
+        
+        current_usage = self._get_current_token_usage()
+        logger.debug(f"Token usage updated: {current_usage}/{self.token_limit_per_minute} in current window")
     
     def _get_current_token_usage(self) -> int:
-        """Calculate total tokens used in the current time window"""
+        """
+        Calculate total tokens used in the current time window
+        """
         return sum(tokens for _, tokens in self.token_history)
     
     def _check_rate_limit(self, estimated_tokens: int) -> float:
-        """Check if sending this many tokens would exceed rate limit
-        Returns wait time in seconds, or 0 if no wait needed"""
+        """
+        Check if sending this many tokens would exceed rate limit
+        Returns wait time in seconds, or 0 if no wait needed
+        """
         current_usage = self._get_current_token_usage()
         
         if current_usage + estimated_tokens <= self.token_limit_per_minute:
@@ -52,16 +65,23 @@ class LLMService:
             
         oldest_timestamp = self.token_history[0][0]
         time_to_wait = (oldest_timestamp + self.window_size_seconds) - time.time()
-        return max(0, time_to_wait)
+        wait_time = max(0, time_to_wait)
+        
+        if wait_time > 0:
+            logger.info(f"Rate limit would be exceeded. Waiting {wait_time:.2f}s before processing. " 
+                      f"Current usage: {current_usage}/{self.token_limit_per_minute}")
+        
+        return wait_time
     
     async def analyze_documents(self, document_texts: List[str]) -> str:
-        """Send documents to LLM for comprehensive title chain analysis
+        """
+        Send documents to LLM for title report generation with rate limiting
         
         Args:
             document_texts: List of document text contents
             
         Returns:
-            Structured title report text with complete chain of title
+            Structured title report text
         """
         if not document_texts:
             logger.warning("No document texts provided for analysis")
@@ -73,67 +93,84 @@ class LLMService:
             combined_text = "\n\n---DOCUMENT SEPARATOR---\n\n".join(document_texts)
             
             prompt = f"""
-            You are a specialized legal assistant with expertise in property law and title searches. 
-            Analyze the following property documents to generate a COMPREHENSIVE CHAIN OF TITLE with EVERY transfer and transaction in chronological order.
+            You are an expert legal document summarizer with deep knowledge of Indian land records and property law. 
+            Given the following land record or mutation register, extract and present the complete CHAIN OF TITLE in a structured format.
 
             ## KEY INSTRUCTIONS:
-            1. EXTRACT EVERY TRANSACTION & ENTRY in the document history
-            2. Begin with the EARLIEST recorded owner and proceed chronologically to present
-            3. For EACH entry in the chain, include:
-               - Entry/registration number
-               - Exact date (DD/MM/YYYY format)
-               - Complete names of ALL parties (transferors and transferees)
-               - Type of transaction (sale, inheritance, subdivision, land use change, etc.)
-               - Survey/block numbers with precise measurements
+            Extract and organize ALL ownership transfers and significant events affecting the property in CHRONOLOGICAL ORDER (oldest to newest).
 
-            4. PAY SPECIAL ATTENTION to:
-               - Mutation records (numbered entries)
-               - Non-agricultural conversion orders
-               - Changes in survey numbers or subdivision of plots
-               - Court orders or government notifications
+            For each entry in the chain of title, identify and include:
+            1. Entry/Memo Number (નોધ નંબર)
+            2. Entry Date (નોધની તારીખ) - format as DD/MM/YYYY
+            3. Type of Change (ફેરફારનો પ્રકાર) - e.g., sale, inheritance, conversion, etc.
+            4. Parties Involved – ALL sellers/transferors and buyers/transferees
+            5. Survey Number(s) affected
+            6. Land Area Involved (with units)
+            7. Any Government Orders or File References
+            8. Outcome/Status - e.g., Approved, Rejected, Pending
 
-            5. IDENTIFY ANY GAPS in the title chain
+            Pay special attention to:
+            - Non-agricultural conversion orders (બીન ખેતી)
+            - Mutation entries (નોંધ)
+            - Land division/consolidation (ટુકડો/એકત્રીકરણ)
+            - Court orders or collector decisions
+            - Inheritance transfers
 
-            ## Document Content:
+            ## Document Content to Analyze:
             {combined_text}
 
-            ## FORMAT:
-            
-            # COMPLETE CHAIN OF TITLE REPORT
-            
-            PROPERTY IDENTIFICATION:
-            - UPIN/ID: [Property ID]
-            - Survey/Block Number: [Number]
-            - Location: [Village/Taluka/District]
-            - Area: [Measurement with units]
-            - Current Classification: [Type]
-            
-            CHAIN OF TITLE (CHRONOLOGICAL):
-            
+            ## FORMAT YOUR RESPONSE AS FOLLOWS:
+
+            # CHAIN OF TITLE REPORT
+
+            ## PROPERTY IDENTIFICATION
+            - UPIN/Property ID: [Extract from document]
+            - Survey/Block Number: [Current number]
+            - Village/Town: [Extract from document]
+            - Taluka/District: [Extract from document] 
+            - Total Area: [With units]
+            - Current Land Use: [Agricultural/Non-agricultural/Commercial, etc.]
+
+            ## CHRONOLOGICAL CHAIN OF TITLE
+
             1. [EARLIEST ENTRY]
+               Entry No: [Number]
                Date: [DD/MM/YYYY]
-               Entry No.: [Number if available]
-               Transaction: [Type]
-               Parties: [All parties]
-               Survey No.: [Number]
-               Area: [Measurement]
-               Details: [Description]
-            
-            [CONTINUE FOR EACH TRANSACTION]
-            
-            CURRENT OWNERSHIP:
-            Based on the chain of title, the current legal owner(s) is/are [Names] as evidenced by [latest transaction details].
+               Type: [Transaction type]
+               From: [Previous owner(s)]
+               To: [New owner(s)]
+               Survey No: [Number(s)]
+               Area: [Measurement with units]
+               Reference: [Any file/order numbers]
+               Details: [Brief description of transaction]
+               Status: [Approved/Rejected/Pending]
+
+            2. [SECOND ENTRY]
+               [Same format as above]
+
+            [Continue in chronological order for ALL entries]
+
+            ## CURRENT OWNERSHIP
+            Based on the above chain of title, the current legal owner(s) of the property is/are [Names] as evidenced by Entry No. [Number] dated [Date].
+
+            ## NOTABLE OBSERVATIONS
+            - [Any gaps or inconsistencies in documentation]
+            - [Any encumbrances or restrictions on the property]
+            - [Any other important observations]
             """
             
-            # Estimate tokens for this request
-            system_message = "You are a property law expert specializing in title analysis."
+            # Estimate tokens for this request (prompt + system message)
+            system_message = "You are an expert legal document summarizer specializing in Indian land records and property documentation."
             estimated_tokens = self._estimate_tokens(prompt) + self._estimate_tokens(system_message)
+            
+            logger.debug(f"Estimated token usage for request: {estimated_tokens}")
             
             # Check rate limit
             wait_time = self._check_rate_limit(estimated_tokens)
             if wait_time > 0:
+                # Wait until we can process this request
                 logger.info(f"Rate limit reached. Waiting {wait_time:.2f}s before sending request.")
-                await asyncio.sleep(wait_time)
+                await asyncio.sleep(wait_time)  # Using asyncio.sleep for async compatibility
             
             # Call Groq API with retry mechanism
             max_retries = 3
@@ -157,7 +194,7 @@ class LLMService:
                     tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
                     self._update_token_history(tokens_used)
                     
-                    logger.info(f"LLM analysis completed. Tokens used: {tokens_used}")
+                    logger.info(f"LLM analysis completed successfully. Tokens used: {tokens_used}")
                     return response.choices[0].message.content
                     
                 except Exception as e:
