@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     
     # Groq API settings
     GROQ_API_KEY: str
-    LLM_MODEL: str = "gpt-4o-mini"
+    LLM_MODEL: str = "gpt-4o"
     
     # CORS settings
     BACKEND_CORS_ORIGINS: List[str] = [
