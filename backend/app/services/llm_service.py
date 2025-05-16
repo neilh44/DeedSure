@@ -16,7 +16,7 @@ class LLMService:
         self.model = settings.LLM_MODEL
         
         # Rate limiting settings
-        self.token_limit_per_minute = 50000
+        self.token_limit_per_minute = 8000
         self.token_history = deque()  # Stores (timestamp, token_count) tuples
         self.window_size_seconds = 60  # 1 minute window
         
