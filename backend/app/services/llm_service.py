@@ -155,6 +155,24 @@ class LLMService:
 
             [Continue in chronological order for ALL entries]
 
+            ## OWNERSHIP HIERARCHY DIAGRAM
+            Prepare a clear and concise hierarchical representation of how ownership has transferred over time. Use this format:
+
+            Original Owners: [Names]
+                |
+                | [Date] - [Type of Transfer]
+                v
+            Second Owners: [Names]
+                |
+                | [Date] - [Type of Transfer]
+                v
+            [Continue for each ownership change]
+                |
+                | [Date] - [Type of Transfer]
+                v
+            Current Owners: [Names]
+
+
             ## CURRENT OWNERSHIP
             Based on the above chain of title, the current legal owner(s) of the property is/are [Names] as evidenced by Entry No. [Number] dated [Date].
 
