@@ -134,6 +134,30 @@ class LLMService:
 
             # CHAIN OF TITLE REPORT
 
+            ## ALL STAKEHOLDERS MENTIONED IN DOCUMENT
+            Extract and list ALL individuals, entities, organizations, and institutions mentioned in the document:
+
+            ### Individual Persons:
+            - [Name 1] - [Role/Relationship to property, e.g., Original Owner, Buyer, Seller, Heir, etc.]
+            - [Name 2] - [Role/Relationship to property]
+            - [Continue for all individuals]
+
+            ### Financial Institutions/Banks:
+            - [Institution Name 1] - [Role, e.g., Lender, Mortgage Provider, etc.]
+            - [Institution Name 2] - [Role]
+            - [Continue for all institutions]
+
+            ### Government Bodies/Officials:
+            - [Department/Official Name 1] - [Role, e.g., Revenue Department, Collector, etc.]
+            - [Department/Official Name 2] - [Role]
+            - [Continue for all government entities]
+
+            ### Other Entities:
+            - [Company/Organization Name 1] - [Role/Relationship]
+            - [Company/Organization Name 2] - [Role/Relationship]
+            - [Continue for all other entities]
+
+
             ## PROPERTY IDENTIFICATION
             - UPIN/Property ID: [Extract from document]
             - Survey/Block Number: [Current number]
